@@ -49,8 +49,9 @@ Audio capture MUST be toggled via a single global hotkey using
   as WAV in memory and sent to the transcription API in a background
   `threading.Thread`.
 
-Recording MUST NOT start if the API key is empty; a warning
-notification MUST be shown instead.
+Recording MUST NOT start if the API key is not set; a warning
+notification MUST be shown instead. The API key MUST be read from
+the `GEMINI_API_KEY` environment variable, NOT stored in config.
 
 **Rationale**: A toggle hotkey provides the fastest voice capture
 workflow without requiring mouse interaction.
@@ -93,7 +94,8 @@ The application MUST remain a single-purpose tool with a flat module
 structure:
 
 - `config.py`: JSON config load/save from
-  `~/.config/voice2text/config.json`
+  `~/.config/voice2text/config.json`; API key from env var
+  `GEMINI_API_KEY`
 - `recorder.py`: Audio capture via sounddevice
 - `transcriber.py`: Gemini API call
 - `app.py`: Qt application, tray icon, settings dialog, coordination
@@ -115,6 +117,7 @@ reliability for desktop tools.
 - **Text Insertion**: xdotool (system dependency, X11 only)
 - **Target Platform**: Kubuntu, X11, KDE Plasma 5.27
 - **Config Format**: JSON at `~/.config/voice2text/config.json`
+  (API key via `GEMINI_API_KEY` env var, not in config file)
 - **UI Language**: All user-facing strings MUST be in Russian
 - **System Dependencies**: `xdotool`, `portaudio19-dev`
 - **Entry Point**: `python -m voice2text` via `__main__.py`
@@ -149,4 +152,4 @@ reliability for desktop tools.
 - Any feature proposal that violates a principle MUST either be
   rejected or accompanied by a constitution amendment.
 
-**Version**: 1.0.0 | **Ratified**: 2026-03-07 | **Last Amended**: 2026-03-07
+**Version**: 1.1.0 | **Ratified**: 2026-03-07 | **Last Amended**: 2026-03-07
