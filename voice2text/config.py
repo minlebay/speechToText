@@ -20,7 +20,7 @@ DEFAULTS = {
 def setup_logging():
     os.makedirs(CONFIG_DIR, exist_ok=True)
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[
             logging.FileHandler(LOG_FILE, encoding="utf-8"),
@@ -45,9 +45,10 @@ def load_config():
 
 
 def save_config(cfg):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
+    os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+    os.chmod(CONFIG_FILE, 0o600)
     log.info("Конфиг сохранён: %s", CONFIG_FILE)
 
 
