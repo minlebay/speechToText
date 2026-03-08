@@ -208,7 +208,7 @@ class App:
             t.start()
 
     def _on_transcription(self, text):
-        log.info("Транскрипция получена (%d символов): %s", len(text), text[:80])
+        log.info("Транскрипция получена: %d символов", len(text))
         clipboard = QApplication.clipboard()
         clipboard.setText(text)
 

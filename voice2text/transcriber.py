@@ -35,7 +35,7 @@ def transcribe_whisper(audio_wav, language="ru", model_name="base"):
         segments, info = model.transcribe(audio, language=language, beam_size=5)
         result = " ".join(seg.text.strip() for seg in segments).strip()
 
-        log.info("Транскрипция получена: %s", result[:80])
+        log.info("Транскрипция получена: %d символов", len(result))
         return result
     except Exception as e:
         log.error("Ошибка Whisper транскрипции: %s", e)
@@ -70,8 +70,7 @@ def transcribe_gemini(audio_wav, api_key, language="ru"):
         for char in ("`", "*", "_", "~", '"', "'"):
             if result.startswith(char) and result.endswith(char):
                 result = result.strip(char)
-        log.debug("Сырой ответ: %r → очищенный: %r", raw, result)
-        log.info("Транскрипция получена: %s", result[:80])
+        log.info("Транскрипция получена: %d символов", len(result))
         return result
     except Exception as e:
         log.error("Ошибка Gemini транскрипции: %s", e)
@@ -100,7 +99,7 @@ def transcribe_google_stt(audio_wav, language="ru"):
         response = client.recognize(config=config, audio=audio)
         result = " ".join(r.alternatives[0].transcript for r in response.results).strip()
 
-        log.info("Транскрипция получена: %s", result[:80])
+        log.info("Транскрипция получена: %d символов", len(result))
         return result
     except Exception as e:
         log.error("Ошибка Google STT транскрипции: %s", e)
