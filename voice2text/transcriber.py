@@ -63,6 +63,9 @@ def transcribe_gemini(audio_wav, api_key, language="ru"):
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[prompt, audio_part],
+            config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         )
 
         raw = response.text.strip()

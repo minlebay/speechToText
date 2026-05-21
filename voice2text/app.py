@@ -4,7 +4,7 @@ import sys
 import threading
 
 from PyQt5.QtCore import QObject, pyqtSignal
-from PyQt5.QtGui import QColor, QIcon, QPainter, QPixmap
+from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
 )
 
 from voice2text.config import get_api_key, load_config, save_config, setup_logging
+from voice2text.icons import make_tray_icon
 
 log = logging.getLogger(__name__)
 from voice2text.recorder import Recorder
@@ -30,17 +31,6 @@ class SignalBridge(QObject):
     transcription_ready = pyqtSignal(str)
     error = pyqtSignal(str)
 
-
-def make_icon(color):
-    pixmap = QPixmap(64, 64)
-    pixmap.fill(QColor(0, 0, 0, 0))
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-    painter.setBrush(QColor(color))
-    painter.setPen(QColor(color))
-    painter.drawEllipse(4, 4, 56, 56)
-    painter.end()
-    return QIcon(pixmap)
 
 
 class SettingsDialog(QDialog):
@@ -102,7 +92,7 @@ class App:
         log.info("Инициализация приложения, конфиг: %s", self.config)
         self.recorder = Recorder()
         self.signals = SignalBridge()
-        self.tray = QSystemTrayIcon(make_icon("green"))
+        self.tray = QSystemTrayIcon(make_tray_icon("idle"))
         self.tray.setToolTip("Voice2Text — Готов")
 
         menu = QMenu()
@@ -182,13 +172,13 @@ class App:
                 self.tray.showMessage("Voice2Text — Ошибка", str(e), QSystemTrayIcon.Critical, 5000)
                 return
             self.state = "recording"
-            self.tray.setIcon(make_icon("red"))
+            self.tray.setIcon(make_tray_icon("recording"))
             self.tray.setToolTip("Voice2Text — Запись...")
             self.tray.showMessage("Voice2Text", "Запись...", QSystemTrayIcon.Information, 1500)
         elif self.state == "recording":
             audio_data = self.recorder.stop()
             self.state = "transcribing"
-            self.tray.setIcon(make_icon("yellow"))
+            self.tray.setIcon(make_tray_icon("transcribing"))
             self.tray.setToolTip("Voice2Text — Обработка...")
 
             language = self.config["language"]
@@ -219,14 +209,14 @@ class App:
         preview = text[:50] + ("..." if len(text) > 50 else "")
         self.tray.showMessage("Voice2Text", preview, QSystemTrayIcon.Information, 3000)
         self.state = "idle"
-        self.tray.setIcon(make_icon("green"))
+        self.tray.setIcon(make_tray_icon("idle"))
         self.tray.setToolTip("Voice2Text — Готов")
 
     def _on_error(self, msg):
         log.error("Ошибка: %s", msg)
         self.tray.showMessage("Voice2Text — Ошибка", msg, QSystemTrayIcon.Critical, 5000)
         self.state = "idle"
-        self.tray.setIcon(make_icon("green"))
+        self.tray.setIcon(make_tray_icon("idle"))
         self.tray.setToolTip("Voice2Text — Готов")
 
     def _open_settings(self):

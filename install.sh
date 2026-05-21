@@ -56,6 +56,11 @@ exec "$HOME/.local/share/voice2text/venv/bin/python" -m voice2text "$@"
 LAUNCHER
 chmod +x "$BIN_DIR/$APP_NAME"
 
+# Установка иконки приложения
+ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
+mkdir -p "$ICON_DIR"
+cp "$SCRIPT_DIR/voice2text/assets/voice2text.svg" "$ICON_DIR/voice2text.svg"
+
 # Создание .desktop файла
 mkdir -p "$DESKTOP_DIR"
 cat > "$DESKTOP_DIR/$APP_NAME.desktop" << EOF
@@ -63,6 +68,7 @@ cat > "$DESKTOP_DIR/$APP_NAME.desktop" << EOF
 Name=Voice2Text
 Comment=Голосовой ввод текста
 Exec=$BIN_DIR/$APP_NAME
+Icon=voice2text
 Type=Application
 Categories=Utility;Audio;
 StartupNotify=false
