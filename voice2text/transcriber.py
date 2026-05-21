@@ -42,12 +42,12 @@ def transcribe_whisper(audio_wav, language="ru", model_name="base"):
         raise RuntimeError(f"Ошибка транскрипции: {e}") from e
 
 
-def transcribe_gemini(audio_wav, api_key, language="ru"):
+def transcribe_gemini(audio_wav, api_key, language="ru", model="gemini-3.5-flash"):
     try:
         from google import genai
         from google.genai import types
 
-        log.info("Gemini транскрипция (%d байт, язык=%s)", len(audio_wav), language)
+        log.info("Gemini транскрипция (%d байт, язык=%s, модель=%s)", len(audio_wav), language, model)
         client = genai.Client(api_key=api_key)
 
         prompt = (
@@ -60,12 +60,16 @@ def transcribe_gemini(audio_wav, api_key, language="ru"):
 
         audio_part = types.Part.from_bytes(data=audio_wav, mime_type="audio/wav")
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[prompt, audio_part],
-            config=types.GenerateContentConfig(
+        gen_config = None
+        if "2.5" in model or "3.5" in model:
+            gen_config = types.GenerateContentConfig(
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
+            )
+
+        response = client.models.generate_content(
+            model=model,
+            contents=[prompt, audio_part],
+            config=gen_config,
         )
 
         raw = response.text.strip()
@@ -109,10 +113,11 @@ def transcribe_google_stt(audio_wav, language="ru"):
         raise RuntimeError(f"Ошибка транскрипции: {e}") from e
 
 
-def transcribe(audio_wav, language="ru", backend="whisper", api_key="", whisper_model="base"):
+def transcribe(audio_wav, language="ru", backend="whisper", api_key="", whisper_model="base",
+               gemini_model="gemini-3.5-flash"):
     if backend == "whisper":
         return transcribe_whisper(audio_wav, language, whisper_model)
     elif backend == "google_stt":
         return transcribe_google_stt(audio_wav, language)
     else:
-        return transcribe_gemini(audio_wav, api_key, language)
+        return transcribe_gemini(audio_wav, api_key, language, gemini_model)

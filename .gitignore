@@ -12,4 +12,4 @@ dist/
 *.swp
 .vscode/
 .idea/
-deb/*
+deb/*/

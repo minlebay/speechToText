@@ -63,6 +63,19 @@ class SettingsDialog(QDialog):
         self.whisper_model_combo.setCurrentText(config.get("whisper_model", "base"))
         form.addRow("Whisper модель:", self.whisper_model_combo)
 
+        self.gemini_model_combo = QComboBox()
+        self.gemini_model_combo.addItems([
+            "gemini-3.5-flash",
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+        ])
+        self.gemini_model_combo.setCurrentText(config.get("gemini_model", "gemini-3.5-flash"))
+        form.addRow("Gemini модель:", self.gemini_model_combo)
+
         layout.addLayout(form)
 
         buttons = QHBoxLayout()
@@ -81,6 +94,7 @@ class SettingsDialog(QDialog):
             "language": self.language_edit.text(),
             "backend": self.backend_combo.currentText(),
             "whisper_model": self.whisper_model_combo.currentText(),
+            "gemini_model": self.gemini_model_combo.currentText(),
         }
 
 
@@ -185,11 +199,13 @@ class App:
             backend = self.config.get("backend", "whisper")
             api_key = get_api_key() if backend == "gemini" else ""
             whisper_model = self.config.get("whisper_model", "base")
+            gemini_model = self.config.get("gemini_model", "gemini-2.5-flash")
 
             def worker():
                 try:
                     text = transcribe(audio_data, language=language, backend=backend,
-                                      api_key=api_key, whisper_model=whisper_model)
+                                      api_key=api_key, whisper_model=whisper_model,
+                                      gemini_model=gemini_model)
                     self.signals.transcription_ready.emit(text)
                 except Exception as e:
                     self.signals.error.emit(str(e))

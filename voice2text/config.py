@@ -14,6 +14,7 @@ DEFAULTS = {
     "language": "ru",
     "backend": "whisper",
     "whisper_model": "base",
+    "gemini_model": "gemini-3.5-flash",
 }
 
 
