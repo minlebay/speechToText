@@ -42,12 +42,15 @@ def transcribe_whisper(audio_wav, language="ru", model_name="base"):
         raise RuntimeError(f"Ошибка транскрипции: {e}") from e
 
 
-def transcribe_gemini(audio_wav, api_key, language="ru", model="gemini-3.5-flash"):
+def transcribe_gemini(audio_wav, api_key, language="ru", model="gemini-3.5-flash", sanitize_fillers=False):
     try:
         from google import genai
         from google.genai import types
 
-        log.info("Gemini транскрипция (%d байт, язык=%s, модель=%s)", len(audio_wav), language, model)
+        log.info(
+            "Gemini транскрипция (%d байт, язык=%s, модель=%s, очистка=%s)",
+            len(audio_wav), language, model, sanitize_fillers,
+        )
         client = genai.Client(api_key=api_key)
 
         prompt = (
@@ -57,6 +60,14 @@ def transcribe_gemini(audio_wav, api_key, language="ru", model="gemini-3.5-flash
             f"Preserve each word in its original language. "
             f"Output only the transcription text, nothing else."
         )
+        if sanitize_fillers:
+            prompt += (
+                " Remove filler words and hesitation sounds (e.g. 'э', 'э-э', 'ну', "
+                "'типа', 'как бы', 'короче', 'это самое', 'в общем', 'um', 'uh'), "
+                "false starts, and stuttered word repetitions. "
+                "Do not change the meaning, do not add or omit any actual information, "
+                "do not paraphrase or summarize — only remove disfluencies."
+            )
 
         audio_part = types.Part.from_bytes(data=audio_wav, mime_type="audio/wav")
 
@@ -114,10 +125,10 @@ def transcribe_google_stt(audio_wav, language="ru"):
 
 
 def transcribe(audio_wav, language="ru", backend="whisper", api_key="", whisper_model="base",
-               gemini_model="gemini-3.5-flash"):
+               gemini_model="gemini-3.5-flash", sanitize_fillers=False):
     if backend == "whisper":
         return transcribe_whisper(audio_wav, language, whisper_model)
     elif backend == "google_stt":
         return transcribe_google_stt(audio_wav, language)
     else:
-        return transcribe_gemini(audio_wav, api_key, language, gemini_model)
+        return transcribe_gemini(audio_wav, api_key, language, gemini_model, sanitize_fillers)

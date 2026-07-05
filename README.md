@@ -25,28 +25,23 @@ sudo apt install xdotool portaudio19-dev python3-venv
 
 ## Установка
 
+Приложение устанавливается из `.deb`-пакета (см. каталог `deb/`):
+
 ```bash
-git clone <repo-url>
-cd speechToText
-./install.sh
+sudo apt install ./deb/voice2text_<версия>_amd64.deb
 ```
 
-Скрипт автоматически:
-- Создаст виртуальное окружение в `~/.local/share/voice2text/`
+Пакет автоматически:
+
+- Создаст виртуальное окружение в `/usr/share/voice2text/`
 - Установит все Python-зависимости
-- Создаст команду `voice2text` в `~/.local/bin/`
+- Создаст команду `voice2text` в `/usr/local/bin/`
 - Создаст `.desktop` файл для меню приложений
 
 ## Запуск
 
 ```bash
 voice2text
-```
-
-Если `~/.local/bin` не в PATH, добавьте в `~/.bashrc`:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ## Настройка движков
@@ -111,22 +106,22 @@ export GOOGLE_APPLICATION_CREDENTIALS="/путь/к/service-account.json"
 
 | Путь | Описание |
 |------|----------|
-| `~/.local/share/voice2text/` | Установленное приложение и venv |
-| `~/.local/bin/voice2text` | Скрипт запуска |
+| `/usr/share/voice2text/` | Установленное приложение и venv |
+| `/usr/local/bin/voice2text` | Скрипт запуска |
 | `~/.config/voice2text/config.json` | Настройки |
 | `~/.config/voice2text/voice2text.log` | Лог-файл |
 
 ## Удаление
 
 ```bash
-./uninstall.sh
+sudo apt remove voice2text
 ```
 
 Конфиг в `~/.config/voice2text/` сохраняется.
 
 ## Структура проекта
 
-```
+```text
 voice2text/
   __init__.py
   __main__.py       # Точка входа
@@ -134,7 +129,6 @@ voice2text/
   config.py         # Загрузка/сохранение конфига, логирование
   recorder.py       # Запись аудио через sounddevice
   transcriber.py    # Транскрипция (whisper/gemini/google_stt)
-install.sh          # Установка
-uninstall.sh        # Удаление
+deb/                # Сборки .deb-пакета для установки
 requirements.txt    # Python-зависимости
 ```

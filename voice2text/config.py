@@ -16,6 +16,7 @@ DEFAULTS = {
     "whisper_model": "base",
     "gemini_model": "gemini-3.5-flash",
     "audio_device": None,
+    "sanitize_fillers": False,
 }
 
 

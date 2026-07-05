@@ -5,14 +5,16 @@ import sys
 import threading
 import time
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt5.QtCore import QObject, Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFormLayout,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMenu,
     QPushButton,
@@ -20,6 +22,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
 )
 
+from voice2text import __version__
 from voice2text.config import get_api_key, load_config, save_config, setup_logging
 from voice2text.icons import make_tray_icon
 
@@ -146,6 +149,12 @@ class SettingsDialog(QDialog):
         self.gemini_model_combo.setCurrentText(config.get("gemini_model", "gemini-3.5-flash"))
         form.addRow("Gemini модель:", self.gemini_model_combo)
 
+        self.sanitize_checkbox = QCheckBox("Очищать текст от слов-паразитов (доступно только с движком Gemini)")
+        self.sanitize_checkbox.setChecked(config.get("sanitize_fillers", False))
+        form.addRow(self.sanitize_checkbox)
+        self.backend_combo.currentTextChanged.connect(self._update_sanitize_availability)
+        self._update_sanitize_availability(self.backend_combo.currentText())
+
         self.device_combo = QComboBox()
         self.device_combo.addItem("По умолчанию (системное)", None)
         for desc, name in _list_pulse_sources():
@@ -155,6 +164,10 @@ class SettingsDialog(QDialog):
             idx = self.device_combo.findData(current_device)
             self.device_combo.setCurrentIndex(idx if idx >= 0 else 0)
         form.addRow("Устройство записи:", self.device_combo)
+
+        version_label = QLabel(__version__)
+        version_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        form.addRow("Версия:", version_label)
 
         layout.addLayout(form)
 
@@ -167,6 +180,10 @@ class SettingsDialog(QDialog):
         buttons.addWidget(cancel_btn)
         layout.addLayout(buttons)
 
+    def _update_sanitize_availability(self, backend):
+        enabled = backend == "gemini"
+        self.sanitize_checkbox.setEnabled(enabled)
+
     def get_config(self):
         return {
             "hotkey": self.hotkey_edit.text(),
@@ -176,6 +193,7 @@ class SettingsDialog(QDialog):
             "whisper_model": self.whisper_model_combo.currentText(),
             "gemini_model": self.gemini_model_combo.currentText(),
             "audio_device": self.device_combo.currentData(),
+            "sanitize_fillers": self.sanitize_checkbox.isChecked(),
         }
 
 
@@ -285,12 +303,13 @@ class App:
             api_key = get_api_key() if backend == "gemini" else ""
             whisper_model = self.config.get("whisper_model", "base")
             gemini_model = self.config.get("gemini_model", "gemini-2.5-flash")
+            sanitize_fillers = backend == "gemini" and self.config.get("sanitize_fillers", False)
 
             def worker():
                 try:
                     text = transcribe(audio_data, language=language, backend=backend,
                                       api_key=api_key, whisper_model=whisper_model,
-                                      gemini_model=gemini_model)
+                                      gemini_model=gemini_model, sanitize_fillers=sanitize_fillers)
                     self.signals.transcription_ready.emit(text)
                 except Exception as e:
                     self.signals.error.emit(str(e))
