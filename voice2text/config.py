@@ -17,6 +17,9 @@ DEFAULTS = {
     "gemini_model": "gemini-3.5-flash",
     "audio_device": None,
     "sanitize_fillers": False,
+    "show_overlay": False,
+    "realtime_transcription": False,
+    "overlay_position": "center",
 }
 
 

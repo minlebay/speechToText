@@ -5,7 +5,7 @@ import sys
 import threading
 import time
 
-from PyQt5.QtCore import QObject, Qt, pyqtSignal
+from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QApplication,
@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
 from voice2text import __version__
 from voice2text.config import get_api_key, load_config, save_config, setup_logging
 from voice2text.icons import make_tray_icon
+from voice2text.overlay import OverlayWindow, compute_level
 
 log = logging.getLogger(__name__)
 from voice2text.recorder import Recorder
@@ -67,9 +68,23 @@ def _list_pulse_sources():
 from voice2text.transcriber import transcribe
 
 
+_OVERLAY_POSITIONS = [
+    ("center", "По центру экрана"),
+    ("top_left", "Верхний левый угол"),
+    ("top_center", "По центру сверху"),
+    ("top_right", "Верхний правый угол"),
+    ("middle_left", "По центру слева"),
+    ("middle_right", "По центру справа"),
+    ("bottom_left", "Нижний левый угол"),
+    ("bottom_center", "По центру снизу"),
+    ("bottom_right", "Нижний правый угол"),
+]
+
+
 class SignalBridge(QObject):
     toggle_recording = pyqtSignal()
     transcription_ready = pyqtSignal(str)
+    partial_transcription_ready = pyqtSignal(str)
     error = pyqtSignal(str)
 
 
@@ -155,6 +170,27 @@ class SettingsDialog(QDialog):
         self.backend_combo.currentTextChanged.connect(self._update_sanitize_availability)
         self._update_sanitize_availability(self.backend_combo.currentText())
 
+        self.overlay_checkbox = QCheckBox("Показывать оверлей во время записи")
+        self.overlay_checkbox.setChecked(config.get("show_overlay", False))
+        form.addRow(self.overlay_checkbox)
+
+        self.realtime_checkbox = QCheckBox("Показывать распознанный текст в реальном времени в оверлее")
+        self.realtime_checkbox.setChecked(config.get("realtime_transcription", False))
+        form.addRow(self.realtime_checkbox)
+
+        self.overlay_position_combo = QComboBox()
+        for value, label in _OVERLAY_POSITIONS:
+            self.overlay_position_combo.addItem(label, value)
+        current_position = config.get("overlay_position", "center")
+        idx = self.overlay_position_combo.findData(current_position)
+        self.overlay_position_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        form.addRow("Положение оверлея:", self.overlay_position_combo)
+
+        self.overlay_checkbox.toggled.connect(self._update_realtime_availability)
+        self.overlay_checkbox.toggled.connect(self.overlay_position_combo.setEnabled)
+        self.overlay_position_combo.setEnabled(self.overlay_checkbox.isChecked())
+        self._update_realtime_availability(self.overlay_checkbox.isChecked())
+
         self.device_combo = QComboBox()
         self.device_combo.addItem("По умолчанию (системное)", None)
         for desc, name in _list_pulse_sources():
@@ -184,6 +220,9 @@ class SettingsDialog(QDialog):
         enabled = backend == "gemini"
         self.sanitize_checkbox.setEnabled(enabled)
 
+    def _update_realtime_availability(self, overlay_enabled):
+        self.realtime_checkbox.setEnabled(overlay_enabled)
+
     def get_config(self):
         return {
             "hotkey": self.hotkey_edit.text(),
@@ -194,6 +233,9 @@ class SettingsDialog(QDialog):
             "gemini_model": self.gemini_model_combo.currentText(),
             "audio_device": self.device_combo.currentData(),
             "sanitize_fillers": self.sanitize_checkbox.isChecked(),
+            "show_overlay": self.overlay_checkbox.isChecked(),
+            "realtime_transcription": self.overlay_checkbox.isChecked() and self.realtime_checkbox.isChecked(),
+            "overlay_position": self.overlay_position_combo.currentData(),
         }
 
 
@@ -209,6 +251,16 @@ class App:
         self.tray = QSystemTrayIcon(make_tray_icon("idle"))
         self.tray.setToolTip("Voice2Text — Готов")
 
+        self.overlay = OverlayWindow()
+        self.overlay.set_position(self.config.get("overlay_position", "center"))
+        self._partial_in_progress = False
+        self._level_timer = QTimer()
+        self._level_timer.setInterval(80)
+        self._level_timer.timeout.connect(self._update_level)
+        self._live_timer = QTimer()
+        self._live_timer.setInterval(2500)
+        self._live_timer.timeout.connect(self._trigger_partial_transcription)
+
         menu = QMenu()
         settings_action = menu.addAction("Настройки")
         settings_action.triggered.connect(self._open_settings)
@@ -219,6 +271,7 @@ class App:
 
         self.signals.toggle_recording.connect(self._on_toggle)
         self.signals.transcription_ready.connect(self._on_transcription)
+        self.signals.partial_transcription_ready.connect(self._on_partial_transcription)
         self.signals.error.connect(self._on_error)
         self.device_monitor.device_connected.connect(self._on_device_connected)
         self.device_monitor.device_disconnected.connect(self._on_device_disconnected)
@@ -292,11 +345,22 @@ class App:
             self.tray.setIcon(make_tray_icon("recording"))
             self.tray.setToolTip("Voice2Text — Запись...")
             self.tray.showMessage("Voice2Text", "Запись...", QSystemTrayIcon.Information, 1500)
+
+            if self.config.get("show_overlay"):
+                self.overlay.set_text_enabled(self.config.get("realtime_transcription", False))
+                self.overlay.show_recording()
+                self._level_timer.start()
+                if self.config.get("realtime_transcription", False):
+                    self._live_timer.start()
         elif self.state == "recording":
+            self._level_timer.stop()
+            self._live_timer.stop()
             audio_data = self.recorder.stop()
             self.state = "transcribing"
             self.tray.setIcon(make_tray_icon("transcribing"))
             self.tray.setToolTip("Voice2Text — Обработка...")
+            if self.config.get("show_overlay"):
+                self.overlay.show_transcribing()
 
             language = self.config["language"]
             backend = self.config.get("backend", "whisper")
@@ -331,6 +395,7 @@ class App:
         self.state = "idle"
         self.tray.setIcon(make_tray_icon("idle"))
         self.tray.setToolTip("Voice2Text — Готов")
+        self.overlay.hide_overlay()
 
     def _on_error(self, msg):
         log.error("Ошибка: %s", msg)
@@ -338,6 +403,44 @@ class App:
         self.state = "idle"
         self.tray.setIcon(make_tray_icon("idle"))
         self.tray.setToolTip("Voice2Text — Готов")
+        self._level_timer.stop()
+        self._live_timer.stop()
+        self.overlay.hide_overlay()
+
+    def _update_level(self):
+        pcm = self.recorder.read_level_window()
+        self.overlay.set_level(compute_level(pcm))
+
+    def _trigger_partial_transcription(self):
+        if self._partial_in_progress or self.state != "recording":
+            return
+        wav_bytes = self.recorder.read_partial_wav()
+        if len(wav_bytes) <= 44:
+            return
+        self._partial_in_progress = True
+
+        language = self.config["language"]
+        backend = self.config.get("backend", "whisper")
+        api_key = get_api_key() if backend == "gemini" else ""
+        whisper_model = self.config.get("whisper_model", "base")
+        gemini_model = self.config.get("gemini_model", "gemini-2.5-flash")
+
+        def worker():
+            try:
+                text = transcribe(wav_bytes, language=language, backend=backend,
+                                  api_key=api_key, whisper_model=whisper_model,
+                                  gemini_model=gemini_model, sanitize_fillers=False)
+                self.signals.partial_transcription_ready.emit(text)
+            except Exception as e:
+                log.debug("Частичная транскрипция не удалась: %s", e)
+            finally:
+                self._partial_in_progress = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_partial_transcription(self, text):
+        if self.state == "recording":
+            self.overlay.set_partial_text(text)
 
     def _on_device_connected(self, name):
         preferred = self.config.get("audio_device")
@@ -369,6 +472,7 @@ class App:
                 self._start_hotkey_listener()
             if new_config.get("audio_device") != old_device:
                 self.recorder.set_device(new_config.get("audio_device"))
+            self.overlay.set_position(new_config.get("overlay_position", "center"))
 
 
 def main():

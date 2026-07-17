@@ -1,37 +1,33 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="#252d47"/>
       <stop offset="100%" stop-color="#111827"/>
     </linearGradient>
-    <radialGradient id="glow" cx="38%" cy="45%" r="52%">
-      <stop offset="0%" stop-color="#7aa2f7" stop-opacity="0.22"/>
+    <radialGradient id="glow" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#7aa2f7" stop-opacity="0.24"/>
       <stop offset="100%" stop-color="#7aa2f7" stop-opacity="0"/>
     </radialGradient>
   </defs>
 
   <!-- Background -->
-  <rect width="256" height="256" rx="52" fill="url(#bg)"/>
-  <rect width="256" height="256" rx="52" fill="url(#glow)"/>
+  <rect width="512" height="512" rx="104" fill="url(#bg)"/>
+  <rect width="512" height="512" rx="104" fill="url(#glow)"/>
 
-  <!-- Mic body (centered at x=90) -->
-  <rect x="66" y="48" width="48" height="90" rx="24" fill="#c0cff7"/>
+  <!-- Mic body -->
+  <rect x="102.5" y="136.5" width="120" height="190" rx="60" fill="#c0cff7"/>
 
-  <!-- Mic stand arc (U shape) -->
-  <path d="M 42 138 a 48 48 0 0 1 96 0"
-        fill="none" stroke="#c0cff7" stroke-width="9" stroke-linecap="round"/>
-
-  <!-- Pole -->
-  <line x1="90" y1="186" x2="90" y2="210" stroke="#c0cff7" stroke-width="9" stroke-linecap="round"/>
-
-  <!-- Base -->
-  <line x1="60" y1="210" x2="120" y2="210" stroke="#c0cff7" stroke-width="9" stroke-linecap="round"/>
+  <!-- Mic cradle + pole + base, equal gap from the capsule all the way round -->
+  <g fill="none" stroke="#c0cff7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 80.5,236.5 L 80.5,266.5 A 82,82 0 0,0 244.5,266.5 L 244.5,236.5" stroke-width="14"/>
+    <line x1="162.5" y1="348.5" x2="162.5" y2="405" stroke-width="14"/>
+    <line x1="97.5" y1="405" x2="227.5" y2="405" stroke-width="14"/>
+  </g>
 
   <!-- Sound waves (right side, decreasing opacity) -->
-  <path d="M 128 88 Q 146 118 128 148"
-        fill="none" stroke="#7aa2f7" stroke-width="7" stroke-linecap="round" opacity="0.9"/>
-  <path d="M 150 68 Q 176 118 150 168"
-        fill="none" stroke="#7aa2f7" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
-  <path d="M 172 48 Q 206 118 172 188"
-        fill="none" stroke="#7aa2f7" stroke-width="5" stroke-linecap="round" opacity="0.32"/>
+  <g fill="none" stroke="#7aa2f7" stroke-linecap="round">
+    <path d="M 292.5,176.5 A 135,135 0 0,1 292.5,336.5" stroke-width="14" opacity="0.9"/>
+    <path d="M 332.5,141.5 A 175,175 0 0,1 332.5,371.5" stroke-width="13" opacity="0.6"/>
+    <path d="M 372.5,106.5 A 215,215 0 0,1 372.5,406.5" stroke-width="12" opacity="0.32"/>
+  </g>
 </svg>

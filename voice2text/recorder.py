@@ -1,9 +1,14 @@
+import io
 import logging
 import os
 import subprocess
 import tempfile
+import wave
 
 log = logging.getLogger(__name__)
+
+SAMPLE_RATE = 48000
+SAMPLE_WIDTH = 2  # bytes (s16le)
 
 
 class Recorder:
@@ -76,3 +81,37 @@ class Recorder:
         duration = (len(data) - 44) / (48000 * self.channels * 2)
         log.info("Записано %d байт (%.1f сек)", len(data), duration)
         return data
+
+    def read_level_window(self, num_bytes=9600):
+        """Возвращает последние num_bytes сырых PCM-данных без остановки записи (для индикатора уровня)."""
+        if self._temp_file is None:
+            return b""
+        try:
+            size = os.path.getsize(self._temp_file.name)
+            if size <= 44:
+                return b""
+            with open(self._temp_file.name, "rb") as f:
+                f.seek(max(44, size - num_bytes))
+                return f.read()
+        except OSError:
+            return b""
+
+    def read_partial_wav(self):
+        """Возвращает корректный WAV со всем, что уже записано, без остановки записи."""
+        if self._temp_file is None:
+            return b""
+        try:
+            with open(self._temp_file.name, "rb") as f:
+                raw = f.read()
+        except OSError:
+            return b""
+        if len(raw) <= 44:
+            return b""
+
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(self.channels)
+            wf.setsampwidth(SAMPLE_WIDTH)
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(raw[44:])
+        return buf.getvalue()

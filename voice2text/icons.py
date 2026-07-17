@@ -1,26 +1,43 @@
-from PyQt5.QtCore import QRectF, Qt
+from PyQt5.QtCore import QPointF, QRectF, Qt
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 
+_MIC_SCALE = 0.1833  # подобрано рендер-тестом под 56x56 фон трей-иконки
 
-def _draw_mic(p: QPainter, cx: float, cy: float, color: str):
-    bw, bh = 14.0, 15.0
-    ar = 11.0
+
+def _draw_mic(p: QPainter, cx: float, cy: float, color: str, scale: float = 1.0):
+    """Микрофон — та же геометрия, что и в assets/voice2text.svg и overlay.py: капсула
+    120x190 rx60, чаша-подставка с вертикальными "ножками" (равный зазор от капсулы
+    по всей длине), ножка и основание. cx,cy задают точку, вокруг которой значок
+    центрируется по видимым краям (bounding box), а не по центру масс."""
+    p.save()
+    p.translate(cx, cy - 227.5 * scale)
+    if scale != 1.0:
+        p.scale(scale, scale)
 
     p.setBrush(QColor(color))
     p.setPen(Qt.NoPen)
-    p.drawRoundedRect(QRectF(cx - bw / 2, cy - bh, bw, bh * 1.3), bw / 2, bw / 2)
+    p.drawRoundedRect(QRectF(-60, 90, 120, 190), 60, 60)
 
-    pen = QPen(QColor(color), 2.5)
-    pen.setCapStyle(Qt.RoundCap)
-    p.setPen(pen)
+    cradle_pen = QPen(QColor(color), 14)
+    cradle_pen.setCapStyle(Qt.RoundCap)
+    cradle_pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(cradle_pen)
     p.setBrush(Qt.NoBrush)
-    arc_top = cy + 2.0
-    p.drawArc(QRectF(cx - ar, arc_top, ar * 2, ar * 1.2), 0, 180 * 16)
+    p.drawLine(QPointF(-82, 190), QPointF(-82, 220))
+    p.drawLine(QPointF(82, 190), QPointF(82, 220))
+    p.drawArc(QRectF(-82, 220 - 82, 164, 164), 180 * 16, 180 * 16)
 
-    pole_top = arc_top + ar * 1.2
-    pole_bot = cy + 22.0
-    p.drawLine(int(cx), int(pole_top), int(cx), int(pole_bot))
-    p.drawLine(int(cx - 8), int(pole_bot), int(cx + 8), int(pole_bot))
+    pole_pen = QPen(QColor(color), 14)
+    pole_pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pole_pen)
+    p.drawLine(QPointF(0, 302), QPointF(0, 358.5))
+
+    base_pen = QPen(QColor(color), 14)
+    base_pen.setCapStyle(Qt.RoundCap)
+    p.setPen(base_pen)
+    p.drawLine(QPointF(-65, 358.5), QPointF(65, 358.5))
+
+    p.restore()
 
 
 def make_tray_icon(state: str) -> QIcon:
@@ -29,14 +46,14 @@ def make_tray_icon(state: str) -> QIcon:
     pix.fill(QColor(0, 0, 0, 0))
     p = QPainter(pix)
     p.setRenderHint(QPainter.Antialiasing)
-    cx, cy = 32.0, 34.0
+    cx, cy = 32.0, 32.0
 
     if state == "idle":
         # Dark navy background, blue mic
         p.setBrush(QColor("#1e2433"))
         p.setPen(Qt.NoPen)
         p.drawRoundedRect(4, 4, 56, 56, 14, 14)
-        _draw_mic(p, cx, cy, "#7aa2f7")
+        _draw_mic(p, cx, cy, "#7aa2f7", scale=_MIC_SCALE)
 
     elif state == "recording":
         # Dark red bg + pulse rings, red mic + recording dot
@@ -46,22 +63,22 @@ def make_tray_icon(state: str) -> QIcon:
         for r, a in ((27, 35), (20, 65)):
             p.setBrush(QColor(255, 60, 60, a))
             p.setPen(Qt.NoPen)
-            p.drawEllipse(QRectF(cx - r, cy - r + 4, r * 2, r * 2))
-        _draw_mic(p, cx, cy, "#ff6b6b")
+            p.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
+        _draw_mic(p, cx, cy, "#ff6b6b", scale=_MIC_SCALE)
         p.setBrush(QColor("#ff2233"))
         p.setPen(Qt.NoPen)
-        p.drawEllipse(QRectF(cx + 13, cy - 26, 10, 10))
+        p.drawEllipse(QRectF(cx + 13, cy - 24, 10, 10))
 
     elif state == "transcribing":
         # Dark purple bg, purple mic, three typing dots
         p.setBrush(QColor("#16132a"))
         p.setPen(Qt.NoPen)
         p.drawRoundedRect(4, 4, 56, 56, 14, 14)
-        _draw_mic(p, cx, cy - 4, "#9d7cd8")
+        _draw_mic(p, cx, cy, "#9d7cd8", scale=_MIC_SCALE)
         p.setBrush(QColor("#9d7cd8"))
         p.setPen(Qt.NoPen)
         for dx in (-10, 0, 10):
-            p.drawEllipse(QRectF(cx + dx - 3, cy + 22, 6, 6))
+            p.drawEllipse(QRectF(cx + dx - 3, cy + 20, 6, 6))
 
     p.end()
     return QIcon(pix)
