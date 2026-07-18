@@ -1,9 +1,10 @@
 import logging
 import math
+import random
 
 import numpy as np
 from PyQt5.QtCore import QPointF, QRectF, Qt, QTimer
-from PyQt5.QtGui import QBrush, QColor, QPainter, QPen, QRadialGradient
+from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QRadialGradient
 from PyQt5.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 log = logging.getLogger(__name__)
@@ -77,15 +78,31 @@ class PulseIndicator(QWidget):
 
     SIZE = 180
 
+    N_MATRIX_COLUMNS = 9
+    MATRIX_TRAIL_LEN = 9
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedSize(self.SIZE, self.SIZE)
         self._state = "recording"
         self._level = 0.0
         self._phase = 0.0
+        self._matrix_phase = 0.0
+        self._matrix_columns = self._make_matrix_columns()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(40)
+
+    def _make_matrix_columns(self):
+        rng = random.Random(1337)
+        columns = []
+        for _ in range(self.N_MATRIX_COLUMNS):
+            columns.append({
+                "speed": rng.uniform(0.5, 1.4),
+                "offset": rng.uniform(0, 100),
+                "chars": [rng.choice("01") for _ in range(40)],
+            })
+        return columns
 
     def set_state(self, state):
         self._state = state
@@ -98,6 +115,7 @@ class PulseIndicator(QWidget):
 
     def _tick(self):
         self._phase = (self._phase + 0.12) % (2 * math.pi)
+        self._matrix_phase += 0.22
         self.update()
 
     def paintEvent(self, event):
@@ -112,8 +130,9 @@ class PulseIndicator(QWidget):
         bg = colors["bg"]
         grad_r = self.SIZE / 2
         gradient = QRadialGradient(cx, cy, grad_r)
-        gradient.setColorAt(0.0, QColor(bg.red(), bg.green(), bg.blue(), 235))
-        gradient.setColorAt(0.6, QColor(bg.red(), bg.green(), bg.blue(), 140))
+        gradient.setColorAt(0.0, QColor(bg.red(), bg.green(), bg.blue(), 250))
+        gradient.setColorAt(0.55, QColor(bg.red(), bg.green(), bg.blue(), 232))
+        gradient.setColorAt(0.85, QColor(bg.red(), bg.green(), bg.blue(), 190))
         gradient.setColorAt(1.0, QColor(bg.red(), bg.green(), bg.blue(), 0))
         p.setBrush(QBrush(gradient))
         p.setPen(Qt.NoPen)
@@ -163,21 +182,60 @@ class PulseIndicator(QWidget):
             p.setBrush(badge)
             p.setPen(Qt.NoPen)
             p.drawEllipse(QRectF(cx - base_r, cy - base_r, base_r * 2, base_r * 2))
-        else:  # transcribing — вращающаяся дуга
-            pen = QPen(colors["ring"], 4)
-            pen.setCapStyle(Qt.RoundCap)
-            p.setPen(pen)
-            p.setBrush(Qt.NoBrush)
-            r = base_r * 1.6
-            start = int((-self._phase * 180 / math.pi) * 16) % (360 * 16)
-            p.drawArc(QRectF(cx - r, cy - r, r * 2, r * 2), start, 100 * 16)
+            # Масштаб и смещение подобраны рендер-тестом по видимым краям иконки (bounding
+            # box), чтобы отступы сверху и снизу внутри круга были одинаковыми.
+            mic_scale = base_r / 162.0
+            mic_offset = 227.5 * mic_scale
+            _draw_mic(p, cx, cy - mic_offset, colors["mic"], scale=mic_scale)
+        else:  # transcribing — «цифровой дождь» из 0/1, ярче к центру круга
+            self._draw_matrix_rain(p, cx, cy, colors["ring"], base_r)
 
-        # Масштаб и смещение подобраны рендер-тестом по видимым краям иконки (bounding box),
-        # чтобы отступы сверху и снизу внутри круга были одинаковыми.
-        mic_scale = base_r / 162.0
-        mic_offset = 227.5 * mic_scale
-        _draw_mic(p, cx, cy - mic_offset, colors["mic"], scale=mic_scale)
         p.end()
+
+    def _draw_matrix_rain(self, p, cx, cy, color, base_r):
+        radius = base_r * 1.7
+        char_h = base_r * 0.24
+
+        clip = QPainterPath()
+        clip.addEllipse(QPointF(cx, cy), radius, radius)
+        p.save()
+        p.setClipPath(clip)
+
+        font = QFont("monospace")
+        font.setBold(True)
+        font.setPixelSize(max(8, int(char_h * 0.9)))
+        p.setFont(font)
+
+        n_cols = len(self._matrix_columns)
+        col_width = (radius * 2) / n_cols
+        rows = int(radius * 2 / char_h) + self.MATRIX_TRAIL_LEN + 2
+
+        for i, col in enumerate(self._matrix_columns):
+            x = cx - radius + col_width * (i + 0.5)
+            head = self._matrix_phase * col["speed"] * 4 + col["offset"]
+            head_row = int(head) % rows
+
+            for j in range(self.MATRIX_TRAIL_LEN):
+                row = head_row - j
+                y = cy - radius + row * char_h
+                dist = math.hypot(x - cx, y - cy)
+                if dist > radius:
+                    continue
+                edge_fade = max(0.0, 1.0 - (dist / radius) ** 1.4)
+                trail_fade = max(0.0, 1.0 - j / self.MATRIX_TRAIL_LEN)
+                alpha = edge_fade * trail_fade
+                if alpha <= 0.02:
+                    continue
+                glyph_color = QColor(color)
+                glyph_color.setAlphaF(min(1.0, alpha))
+                p.setPen(glyph_color)
+                ch = col["chars"][(head_row - j) % len(col["chars"])]
+                p.drawText(
+                    QRectF(x - char_h, y - char_h / 2, char_h * 2, char_h),
+                    Qt.AlignCenter,
+                    ch,
+                )
+        p.restore()
 
 
 class OverlayWindow(QWidget):
