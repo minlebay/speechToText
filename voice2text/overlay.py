@@ -80,6 +80,8 @@ class PulseIndicator(QWidget):
 
     N_MATRIX_COLUMNS = 9
     MATRIX_TRAIL_LEN = 9
+    MATRIX_LENS_STRENGTH = 0.85
+    N_BARS = 120
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -89,9 +91,24 @@ class PulseIndicator(QWidget):
         self._phase = 0.0
         self._matrix_phase = 0.0
         self._matrix_columns = self._make_matrix_columns()
+        self._bar_wobble = self._make_bar_wobble()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(40)
+
+    def _make_bar_wobble(self):
+        # У каждого луча своя пара частот и фаз, а не общая функция от индекса —
+        # иначе лучи выглядят как один и тот же узор, скопированный по кругу.
+        rng = random.Random(2024)
+        return [
+            {
+                "f1": rng.uniform(0.7, 1.9),
+                "f2": rng.uniform(1.8, 3.6),
+                "p1": rng.uniform(0, 2 * math.pi),
+                "p2": rng.uniform(0, 2 * math.pi),
+            }
+            for _ in range(self.N_BARS)
+        ]
 
     def _make_matrix_columns(self):
         rng = random.Random(1337)
@@ -114,7 +131,7 @@ class PulseIndicator(QWidget):
         self._level = self._level * 0.55 + level * 0.45
 
     def _tick(self):
-        self._phase = (self._phase + 0.12) % (2 * math.pi)
+        self._phase += 0.12
         self._matrix_phase += 0.22
         self.update()
 
@@ -151,8 +168,8 @@ class PulseIndicator(QWidget):
             r_start = base_r + gap
             max_extent = max(0.0, outer_max - r_start)
 
-            n_bars = 24
-            bar_width = max(2.0, min(6.0, (2 * math.pi * r_start / n_bars) * 0.55))
+            n_bars = self.N_BARS
+            bar_width = max(1.0, min(6.0, (2 * math.pi * r_start / n_bars) * 0.55))
             alpha = max(0, min(255, int(70 + 170 * voice)))
             bar_color = QColor(colors["ring"])
             bar_color.setAlpha(alpha)
@@ -163,11 +180,13 @@ class PulseIndicator(QWidget):
 
             resting = max_extent * (0.05 + 0.03 * idle)
             for i in range(n_bars):
-                # Две несинхронные синусоиды на столбик — разные столбики "дышат"
-                # не в такт друг другу, получается эффект живого эквалайзера.
+                # У каждого луча своя пара частот/фаз (см. _make_bar_wobble) — без этого
+                # столбики "дышат" по общей формуле от индекса и выглядят одним узором,
+                # скопированным по кругу, а не независимым эквалайзером.
+                w = self._bar_wobble[i]
                 wobble = 0.5 + 0.5 * (
-                    0.6 * math.sin(self._phase * 1.3 + i * 0.9)
-                    + 0.4 * math.sin(self._phase * 2.7 + i * 2.3)
+                    0.6 * math.sin(self._phase * w["f1"] + w["p1"])
+                    + 0.4 * math.sin(self._phase * w["f2"] + w["p2"])
                 )
                 wobble = max(0.0, min(1.0, wobble))
                 bar_len = resting + wobble * voice * max_extent * 3.6
@@ -234,11 +253,18 @@ class PulseIndicator(QWidget):
                 glyph_color.setAlphaF(min(1.0, alpha))
                 p.setPen(glyph_color)
                 ch = col["chars"][(head_row - j) % len(col["chars"])]
+                # Символы ближе к центру круга крупнее — лёгкий эффект лупы,
+                # к краю плавно сходящий к обычному размеру.
+                lens = 1.0 + self.MATRIX_LENS_STRENGTH * max(0.0, 1.0 - dist / radius) ** 2
+                p.save()
+                p.translate(x, y)
+                p.scale(lens, lens)
                 p.drawText(
-                    QRectF(x - char_h, y - char_h / 2, char_h * 2, char_h),
+                    QRectF(-char_h, -char_h / 2, char_h * 2, char_h),
                     Qt.AlignCenter,
                     ch,
                 )
+                p.restore()
         p.restore()
 
 
