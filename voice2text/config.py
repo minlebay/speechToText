@@ -14,7 +14,7 @@ DEFAULTS = {
     "language": "ru",
     "backend": "whisper",
     "whisper_model": "base",
-    "gemini_model": "gemini-3.5-flash",
+    "gemini_model": "gemini-3.8-flash",
     "audio_device": None,
     "sanitize_fillers": False,
     "show_overlay": False,

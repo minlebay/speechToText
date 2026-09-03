@@ -42,7 +42,7 @@ def transcribe_whisper(audio_wav, language="ru", model_name="base"):
         raise RuntimeError(f"Ошибка транскрипции: {e}") from e
 
 
-def transcribe_gemini(audio_wav, api_key, language="ru", model="gemini-3.5-flash", sanitize_fillers=False):
+def transcribe_gemini(audio_wav, api_key, language="ru", model="gemini-3.8-flash", sanitize_fillers=False):
     try:
         from google import genai
         from google.genai import types
@@ -125,7 +125,7 @@ def transcribe_google_stt(audio_wav, language="ru"):
 
 
 def transcribe(audio_wav, language="ru", backend="whisper", api_key="", whisper_model="base",
-               gemini_model="gemini-3.5-flash", sanitize_fillers=False):
+               gemini_model="gemini-3.8-flash", sanitize_fillers=False):
     if backend == "whisper":
         return transcribe_whisper(audio_wav, language, whisper_model)
     elif backend == "google_stt":

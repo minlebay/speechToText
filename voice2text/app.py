@@ -196,6 +196,7 @@ class SettingsDialog(QDialog):
 
         self.gemini_model_combo = QComboBox()
         self.gemini_model_combo.addItems([
+            "gemini-3.8-flash",
             "gemini-3.5-flash",
             "gemini-2.5-flash",
             "gemini-2.5-pro",
@@ -204,7 +205,7 @@ class SettingsDialog(QDialog):
             "gemini-1.5-flash",
             "gemini-1.5-pro",
         ])
-        self.gemini_model_combo.setCurrentText(config.get("gemini_model", "gemini-3.5-flash"))
+        self.gemini_model_combo.setCurrentText(config.get("gemini_model", "gemini-3.8-flash"))
         form.addRow("Gemini модель:", self.gemini_model_combo)
 
         self.sanitize_checkbox = QCheckBox("Очищать текст от слов-паразитов (доступно только с движком Gemini)")
@@ -469,7 +470,7 @@ class App:
             backend = self.config.get("backend", "whisper")
             api_key = get_api_key() if backend == "gemini" else ""
             whisper_model = self.config.get("whisper_model", "base")
-            gemini_model = self.config.get("gemini_model", "gemini-2.5-flash")
+            gemini_model = self.config.get("gemini_model", "gemini-3.8-flash")
             sanitize_fillers = backend == "gemini" and self.config.get("sanitize_fillers", False)
 
             def worker():
@@ -526,7 +527,7 @@ class App:
         backend = self.config.get("backend", "whisper")
         api_key = get_api_key() if backend == "gemini" else ""
         whisper_model = self.config.get("whisper_model", "base")
-        gemini_model = self.config.get("gemini_model", "gemini-2.5-flash")
+        gemini_model = self.config.get("gemini_model", "gemini-3.8-flash")
 
         def worker():
             try:
