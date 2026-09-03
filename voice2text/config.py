@@ -20,6 +20,9 @@ DEFAULTS = {
     "show_overlay": False,
     "realtime_transcription": False,
     "overlay_position": "center",
+    "overlay_theme": "dark",
+    "tray_icon_monochrome": False,
+    "tray_icon_mono_variant": "auto",
 }
 
 

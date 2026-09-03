@@ -40,7 +40,31 @@ def _draw_mic(p: QPainter, cx: float, cy: float, color: str, scale: float = 1.0)
     p.restore()
 
 
-def make_tray_icon(state: str) -> QIcon:
+def _draw_mute_slash(p: QPainter, color: str, width: float = 7.0):
+    """Диагональная черта поверх иконки микрофона — общепринятый знак
+    «звук выключен», не завязанный на цвет фона/состояние."""
+    pen = QPen(QColor(color), width)
+    pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    p.drawLine(QPointF(13, 51), QPointF(51, 13))
+
+
+_MONO_COLORS = {
+    "light": "#f5f5f5",
+    "dark": "#1a1a1a",
+}
+
+
+def make_tray_icon(
+    state: str,
+    monochrome: bool = False,
+    mono_variant: str = "light",
+    muted: bool = False,
+) -> QIcon:
+    if monochrome:
+        return _make_mono_tray_icon(state, mono_variant, muted)
+
     S = 64
     pix = QPixmap(S, S)
     pix.fill(QColor(0, 0, 0, 0))
@@ -79,6 +103,41 @@ def make_tray_icon(state: str) -> QIcon:
         p.setPen(Qt.NoPen)
         for dx in (-10, 0, 10):
             p.drawEllipse(QRectF(cx + dx - 3, cy + 20, 6, 6))
+
+    if muted:
+        _draw_mute_slash(p, "#ffffff")
+
+    p.end()
+    return QIcon(pix)
+
+
+def _make_mono_tray_icon(state: str, mono_variant: str, muted: bool = False) -> QIcon:
+    """Одноцветный силуэт без фона — состояния различаются только формой
+    (точка записи, точки распознавания), а не цветом, чтобы иконка одинаково
+    хорошо читалась на любой панели."""
+    color = _MONO_COLORS.get(mono_variant, _MONO_COLORS["light"])
+    S = 64
+    pix = QPixmap(S, S)
+    pix.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.Antialiasing)
+    cx, cy = 32.0, 32.0
+
+    _draw_mic(p, cx, cy, color, scale=_MIC_SCALE)
+
+    if state == "recording":
+        p.setBrush(QColor(color))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(QRectF(cx + 13, cy - 24, 10, 10))
+
+    elif state == "transcribing":
+        p.setBrush(QColor(color))
+        p.setPen(Qt.NoPen)
+        for dx in (-10, 0, 10):
+            p.drawEllipse(QRectF(cx + dx - 3, cy + 20, 6, 6))
+
+    if muted:
+        _draw_mute_slash(p, color)
 
     p.end()
     return QIcon(pix)

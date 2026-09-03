@@ -44,10 +44,41 @@ def _draw_mic(p: QPainter, cx: float, cy: float, color: str, scale: float = 1.0)
 
     p.restore()
 
-_STATE_COLORS = {
-    "recording": {"bg": QColor(30, 18, 18, 235), "ring": QColor(255, 60, 60), "mic": "#ff6b6b"},
-    "transcribing": {"bg": QColor(22, 19, 42, 235), "ring": QColor(157, 124, 216), "mic": "#9d7cd8"},
+_THEMES = {
+    "dark": {
+        "recording": {
+            "bg": QColor(24, 16, 16, 255),
+            "ring": QColor(255, 60, 60),
+            "mic": "#ff6b6b",
+            "border": QColor(255, 60, 60),
+        },
+        "transcribing": {
+            "bg": QColor(14, 20, 16, 255),
+            "ring": QColor(70, 220, 120),
+            "mic": "#46dc78",
+            "border": QColor(255, 60, 60),
+        },
+    },
+    "light": {
+        "recording": {
+            "bg": QColor(255, 255, 255, 255),
+            "ring": QColor(220, 38, 38),
+            "mic": "#dc2626",
+            "border": QColor(220, 38, 38),
+        },
+        "transcribing": {
+            "bg": QColor(255, 255, 255, 255),
+            "ring": QColor(22, 163, 74),
+            "mic": "#16a34a",
+            "border": QColor(220, 38, 38),
+        },
+    },
 }
+
+
+def _theme_colors(theme, state):
+    theme_map = _THEMES.get(theme, _THEMES["dark"])
+    return theme_map.get(state, theme_map["recording"])
 
 # Точки привязки оверлея: доля (fx, fy) свободного места на экране, куда сдвигать окно.
 POSITIONS = {
@@ -77,6 +108,7 @@ class PulseIndicator(QWidget):
     """Круглый индикатор с иконкой микрофона и пульсирующими кольцами."""
 
     SIZE = 180
+    GLOW_MARGIN = 14  # запас по краям под мягкое красное свечение рамки
 
     N_MATRIX_COLUMNS = 9
     MATRIX_TRAIL_LEN = 9
@@ -85,8 +117,9 @@ class PulseIndicator(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setFixedSize(self.SIZE + 2 * self.GLOW_MARGIN, self.SIZE + 2 * self.GLOW_MARGIN)
         self._state = "recording"
+        self._theme = "dark"
         self._level = 0.0
         self._phase = 0.0
         self._matrix_phase = 0.0
@@ -125,6 +158,10 @@ class PulseIndicator(QWidget):
         self._state = state
         self.update()
 
+    def set_theme(self, theme):
+        self._theme = theme if theme in _THEMES else "dark"
+        self.update()
+
     def set_level(self, level):
         level = max(0.0, min(1.0, level))
         # Экспоненциальное сглаживание — движение выглядит живым, а не дёрганым.
@@ -136,28 +173,44 @@ class PulseIndicator(QWidget):
         self.update()
 
     def paintEvent(self, event):
-        colors = _STATE_COLORS.get(self._state, _STATE_COLORS["recording"])
+        colors = _theme_colors(self._theme, self._state)
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        cx, cy = self.SIZE / 2, self.SIZE / 2
+        cx = cy = self.GLOW_MARGIN + self.SIZE / 2
         base_r = self.SIZE * 0.22
 
-        # Радиальный ореол-подложка — чтобы оверлей был виден на любом фоне
-        # рабочего стола, а не сливался с ним по краям.
+        # Сплошная непрозрачная подложка — оверлей должен быть одинаково хорошо
+        # виден и на тёмном, и на светлом рабочем столе, а не полагаться на
+        # прозрачность, из-за которой он сливался с фоном по краям.
         bg = colors["bg"]
-        grad_r = self.SIZE / 2
-        gradient = QRadialGradient(cx, cy, grad_r)
-        gradient.setColorAt(0.0, QColor(bg.red(), bg.green(), bg.blue(), 250))
-        gradient.setColorAt(0.35, QColor(bg.red(), bg.green(), bg.blue(), 244))
-        gradient.setColorAt(0.55, QColor(bg.red(), bg.green(), bg.blue(), 228))
-        gradient.setColorAt(0.7, QColor(bg.red(), bg.green(), bg.blue(), 195))
-        gradient.setColorAt(0.82, QColor(bg.red(), bg.green(), bg.blue(), 145))
-        gradient.setColorAt(0.91, QColor(bg.red(), bg.green(), bg.blue(), 85))
-        gradient.setColorAt(0.97, QColor(bg.red(), bg.green(), bg.blue(), 30))
-        gradient.setColorAt(1.0, QColor(bg.red(), bg.green(), bg.blue(), 0))
-        p.setBrush(QBrush(gradient))
+        border_w = 2.0
+        grad_r = self.SIZE / 2 - border_w / 2
+        p.setBrush(QBrush(QColor(bg.red(), bg.green(), bg.blue(), 255)))
         p.setPen(Qt.NoPen)
         p.drawEllipse(QRectF(cx - grad_r, cy - grad_r, grad_r * 2, grad_r * 2))
+
+        # Чёткая рамка круга — граница оверлея должна читаться независимо от
+        # того, что находится под ним на экране.
+        border_pen = QPen(colors["border"], border_w)
+        p.setPen(border_pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(QRectF(cx - grad_r, cy - grad_r, grad_r * 2, grad_r * 2))
+
+        # Мягкое красное свечение снаружи рамки, как на референсе — резкий
+        # переход держим у внешнего края рамки, дальше плавно гасим до нуля.
+        border_color = colors["border"]
+        outer_edge = grad_r + border_w / 2
+        glow_r = outer_edge + self.GLOW_MARGIN
+        glow_gradient = QRadialGradient(cx, cy, glow_r)
+        edge_stop = max(0.0, min(1.0, outer_edge / glow_r))
+        transparent = QColor(border_color.red(), border_color.green(), border_color.blue(), 0)
+        glow_gradient.setColorAt(0.0, transparent)
+        glow_gradient.setColorAt(edge_stop, transparent)
+        glow_gradient.setColorAt(edge_stop, QColor(border_color.red(), border_color.green(), border_color.blue(), 150))
+        glow_gradient.setColorAt(1.0, transparent)
+        p.setBrush(QBrush(glow_gradient))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(QRectF(cx - glow_r, cy - glow_r, glow_r * 2, glow_r * 2))
 
         if self._state == "recording":
             idle = 0.5 + 0.5 * math.sin(self._phase)
@@ -295,23 +348,46 @@ class OverlayWindow(QWidget):
         self.text_label.setWordWrap(True)
         self.text_label.setAlignment(Qt.AlignCenter)
         self.text_label.setMaximumWidth(360)
-        self.text_label.setStyleSheet(
-            "QLabel {"
-            "  color: #e8e8f0;"
-            "  background-color: rgba(20, 20, 30, 200);"
-            "  border-radius: 10px;"
-            "  padding: 10px 16px;"
-            "  font-size: 14px;"
-            "}"
-        )
         self.text_label.hide()
         layout.addWidget(self.text_label, 0, Qt.AlignHCenter)
 
         self._show_text = False
         self._position = "center"
+        self._theme = "dark"
+        self._apply_label_style()
 
     def set_position(self, position):
         self._position = position if position in POSITIONS else "center"
+
+    def set_theme(self, theme):
+        self._theme = theme if theme in _THEMES else "dark"
+        self.indicator.set_theme(self._theme)
+        self._apply_label_style()
+
+    def _apply_label_style(self):
+        if self._theme == "light":
+            style = (
+                "QLabel {"
+                "  color: #202024;"
+                "  background-color: rgba(255, 255, 255, 235);"
+                "  border: 2px solid rgba(220, 38, 38, 220);"
+                "  border-radius: 10px;"
+                "  padding: 10px 16px;"
+                "  font-size: 14px;"
+                "}"
+            )
+        else:
+            style = (
+                "QLabel {"
+                "  color: #e8e8f0;"
+                "  background-color: rgba(20, 20, 30, 235);"
+                "  border: 2px solid rgba(255, 60, 60, 200);"
+                "  border-radius: 10px;"
+                "  padding: 10px 16px;"
+                "  font-size: 14px;"
+                "}"
+            )
+        self.text_label.setStyleSheet(style)
 
     def set_text_enabled(self, enabled):
         self._show_text = enabled

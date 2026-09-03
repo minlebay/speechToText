@@ -6,7 +6,7 @@ import threading
 import time
 
 from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon, QPalette
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -68,6 +68,20 @@ def _list_pulse_sources():
 from voice2text.transcriber import transcribe
 
 
+def _is_source_muted(source_name=None):
+    target = source_name or "@DEFAULT_SOURCE@"
+    try:
+        r = subprocess.run(
+            ["pactl", "get-source-mute", target],
+            capture_output=True, text=True, timeout=3,
+        )
+        if r.returncode == 0:
+            return "yes" in r.stdout.lower()
+    except Exception:
+        pass
+    return False
+
+
 _OVERLAY_POSITIONS = [
     ("center", "По центру экрана"),
     ("top_left", "Верхний левый угол"),
@@ -78,6 +92,17 @@ _OVERLAY_POSITIONS = [
     ("bottom_left", "Нижний левый угол"),
     ("bottom_center", "По центру снизу"),
     ("bottom_right", "Нижний правый угол"),
+]
+
+_OVERLAY_THEMES = [
+    ("dark", "Тёмная"),
+    ("light", "Светлая"),
+]
+
+_TRAY_MONO_VARIANTS = [
+    ("auto", "Авто (по цвету панели)"),
+    ("light", "Светлая (для тёмных панелей)"),
+    ("dark", "Тёмная (для светлых панелей)"),
 ]
 
 
@@ -91,10 +116,13 @@ class SignalBridge(QObject):
 class DeviceMonitor(QObject):
     device_connected = pyqtSignal(str)
     device_disconnected = pyqtSignal(str)
+    mute_changed = pyqtSignal(bool)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, device=None):
         super().__init__(parent)
         self._running = False
+        self._device_lock = threading.Lock()
+        self._device = device
 
     def start(self):
         self._running = True
@@ -104,12 +132,22 @@ class DeviceMonitor(QObject):
     def stop(self):
         self._running = False
 
+    def set_device(self, device):
+        with self._device_lock:
+            self._device = device
+
+    def _current_device(self):
+        with self._device_lock:
+            return self._device
+
     @staticmethod
     def _input_device_names():
         return {name for _, name in _list_pulse_sources()}
 
     def _run(self):
         prev = self._input_device_names()
+        prev_mute = _is_source_muted(self._current_device())
+        self.mute_changed.emit(prev_mute)
         while self._running:
             time.sleep(2)
             curr = self._input_device_names()
@@ -118,6 +156,11 @@ class DeviceMonitor(QObject):
             for name in prev - curr:
                 self.device_disconnected.emit(name)
             prev = curr
+
+            curr_mute = _is_source_muted(self._current_device())
+            if curr_mute != prev_mute:
+                self.mute_changed.emit(curr_mute)
+                prev_mute = curr_mute
 
 
 
@@ -186,10 +229,34 @@ class SettingsDialog(QDialog):
         self.overlay_position_combo.setCurrentIndex(idx if idx >= 0 else 0)
         form.addRow("Положение оверлея:", self.overlay_position_combo)
 
+        self.overlay_theme_combo = QComboBox()
+        for value, label in _OVERLAY_THEMES:
+            self.overlay_theme_combo.addItem(label, value)
+        current_theme = config.get("overlay_theme", "dark")
+        idx = self.overlay_theme_combo.findData(current_theme)
+        self.overlay_theme_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        form.addRow("Тема оверлея:", self.overlay_theme_combo)
+
         self.overlay_checkbox.toggled.connect(self._update_realtime_availability)
         self.overlay_checkbox.toggled.connect(self.overlay_position_combo.setEnabled)
+        self.overlay_checkbox.toggled.connect(self.overlay_theme_combo.setEnabled)
         self.overlay_position_combo.setEnabled(self.overlay_checkbox.isChecked())
+        self.overlay_theme_combo.setEnabled(self.overlay_checkbox.isChecked())
         self._update_realtime_availability(self.overlay_checkbox.isChecked())
+
+        self.tray_mono_checkbox = QCheckBox("Монохромная иконка в трее")
+        self.tray_mono_checkbox.setChecked(config.get("tray_icon_monochrome", False))
+        form.addRow(self.tray_mono_checkbox)
+
+        self.tray_mono_variant_combo = QComboBox()
+        for value, label in _TRAY_MONO_VARIANTS:
+            self.tray_mono_variant_combo.addItem(label, value)
+        current_mono_variant = config.get("tray_icon_mono_variant", "light")
+        idx = self.tray_mono_variant_combo.findData(current_mono_variant)
+        self.tray_mono_variant_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.tray_mono_variant_combo.setEnabled(self.tray_mono_checkbox.isChecked())
+        self.tray_mono_checkbox.toggled.connect(self.tray_mono_variant_combo.setEnabled)
+        form.addRow("Цвет монохромной иконки:", self.tray_mono_variant_combo)
 
         self.device_combo = QComboBox()
         self.device_combo.addItem("По умолчанию (системное)", None)
@@ -236,6 +303,9 @@ class SettingsDialog(QDialog):
             "show_overlay": self.overlay_checkbox.isChecked(),
             "realtime_transcription": self.overlay_checkbox.isChecked() and self.realtime_checkbox.isChecked(),
             "overlay_position": self.overlay_position_combo.currentData(),
+            "overlay_theme": self.overlay_theme_combo.currentData(),
+            "tray_icon_monochrome": self.tray_mono_checkbox.isChecked(),
+            "tray_icon_mono_variant": self.tray_mono_variant_combo.currentData(),
         }
 
 
@@ -247,12 +317,15 @@ class App:
         log.info("Инициализация приложения, конфиг: %s", self.config)
         self.recorder = Recorder(device=self.config.get("audio_device"))
         self.signals = SignalBridge()
-        self.device_monitor = DeviceMonitor()
-        self.tray = QSystemTrayIcon(make_tray_icon("idle"))
+        self._mic_muted = False
+        self.device_monitor = DeviceMonitor(device=self.config.get("audio_device"))
+        self.tray = QSystemTrayIcon(self._tray_icon("idle"))
         self.tray.setToolTip("Voice2Text — Готов")
+        self.qt_app.paletteChanged.connect(self._on_palette_changed)
 
         self.overlay = OverlayWindow()
         self.overlay.set_position(self.config.get("overlay_position", "center"))
+        self.overlay.set_theme(self.config.get("overlay_theme", "dark"))
         self._partial_in_progress = False
         self._level_timer = QTimer()
         self._level_timer.setInterval(80)
@@ -275,9 +348,39 @@ class App:
         self.signals.error.connect(self._on_error)
         self.device_monitor.device_connected.connect(self._on_device_connected)
         self.device_monitor.device_disconnected.connect(self._on_device_disconnected)
+        self.device_monitor.mute_changed.connect(self._on_mute_changed)
         self.device_monitor.start()
 
         self._start_hotkey_listener()
+
+    def _tray_icon(self, state):
+        variant = self.config.get("tray_icon_mono_variant", "auto")
+        if variant == "auto":
+            variant = self._detect_panel_variant()
+        return make_tray_icon(
+            state,
+            monochrome=self.config.get("tray_icon_monochrome", False),
+            mono_variant=variant,
+            muted=self._mic_muted,
+        )
+
+    def _detect_panel_variant(self):
+        """Определяет, светлая или тёмная сейчас цветовая схема (Plasma/GTK
+        применяют её и к палитре Qt-приложений), чтобы выбрать контрастный
+        цвет для монохромной иконки — светлый силуэт для тёмных панелей,
+        тёмный для светлых."""
+        color = self.qt_app.palette().color(QPalette.Window)
+        luminance = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
+        return "dark" if luminance > 140 else "light"
+
+    def _on_palette_changed(self, _palette):
+        self.tray.setIcon(self._tray_icon(self.state))
+
+    def _on_mute_changed(self, muted):
+        self._mic_muted = muted
+        self.tray.setIcon(self._tray_icon(self.state))
+        tooltip_suffix = " (микрофон заглушен)" if muted else ""
+        self.tray.setToolTip(self.tray.toolTip().split(" (микрофон")[0] + tooltip_suffix)
 
     def _start_hotkey_listener(self):
         from pynput.keyboard import GlobalHotKeys
@@ -342,7 +445,7 @@ class App:
                 self.tray.showMessage("Voice2Text — Ошибка", str(e), QSystemTrayIcon.Critical, 5000)
                 return
             self.state = "recording"
-            self.tray.setIcon(make_tray_icon("recording"))
+            self.tray.setIcon(self._tray_icon("recording"))
             self.tray.setToolTip("Voice2Text — Запись...")
             self.tray.showMessage("Voice2Text", "Запись...", QSystemTrayIcon.Information, 1500)
 
@@ -357,7 +460,7 @@ class App:
             self._live_timer.stop()
             audio_data = self.recorder.stop()
             self.state = "transcribing"
-            self.tray.setIcon(make_tray_icon("transcribing"))
+            self.tray.setIcon(self._tray_icon("transcribing"))
             self.tray.setToolTip("Voice2Text — Обработка...")
             if self.config.get("show_overlay"):
                 self.overlay.show_transcribing()
@@ -393,7 +496,7 @@ class App:
         preview = text[:50] + ("..." if len(text) > 50 else "")
         self.tray.showMessage("Voice2Text", preview, QSystemTrayIcon.Information, 3000)
         self.state = "idle"
-        self.tray.setIcon(make_tray_icon("idle"))
+        self.tray.setIcon(self._tray_icon("idle"))
         self.tray.setToolTip("Voice2Text — Готов")
         self.overlay.hide_overlay()
 
@@ -401,7 +504,7 @@ class App:
         log.error("Ошибка: %s", msg)
         self.tray.showMessage("Voice2Text — Ошибка", msg, QSystemTrayIcon.Critical, 5000)
         self.state = "idle"
-        self.tray.setIcon(make_tray_icon("idle"))
+        self.tray.setIcon(self._tray_icon("idle"))
         self.tray.setToolTip("Voice2Text — Готов")
         self._level_timer.stop()
         self._live_timer.stop()
@@ -472,7 +575,10 @@ class App:
                 self._start_hotkey_listener()
             if new_config.get("audio_device") != old_device:
                 self.recorder.set_device(new_config.get("audio_device"))
+                self.device_monitor.set_device(new_config.get("audio_device"))
             self.overlay.set_position(new_config.get("overlay_position", "center"))
+            self.overlay.set_theme(new_config.get("overlay_theme", "dark"))
+            self.tray.setIcon(self._tray_icon(self.state))
 
 
 def main():
