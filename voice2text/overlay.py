@@ -3,11 +3,71 @@ import math
 import random
 
 import numpy as np
-from PyQt5.QtCore import QPointF, QRectF, Qt, QTimer
-from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QRadialGradient
-from PyQt5.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+from PyQt5.QtCore import QPointF, QRect, QRectF, Qt, QTimer
+from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QRadialGradient, QRegion
+from PyQt5.QtWidgets import QApplication, QGraphicsDropShadowEffect, QLabel, QVBoxLayout, QWidget
 
 log = logging.getLogger(__name__)
+
+try:
+    from Xlib import Xatom
+    from Xlib.display import Display as _XDisplay
+except Exception:
+    _XDisplay = None
+
+_xlib_display = None
+_xlib_unavailable = False
+
+
+def _get_xlib_display():
+    """Отдельное соединение с X-сервером для нативных свойств окна KWin —
+    Qt/xcb не даёт установить _KDE_NET_WM_BLUR_BEHIND_REGION напрямую."""
+    global _xlib_display, _xlib_unavailable
+    if _xlib_unavailable or _XDisplay is None:
+        return None
+    if _xlib_display is None:
+        try:
+            _xlib_display = _XDisplay()
+        except Exception as e:
+            log.debug("Xlib-дисплей недоступен, нативный блюр KWin отключён: %s", e)
+            _xlib_unavailable = True
+            return None
+    return _xlib_display
+
+
+def _stadium_region_rects(x, y, w, h):
+    """Разбивает область со скруглением radius=h/2 (форма нашей капсулы) на
+    набор прямоугольников: два круглых торца плюс прямоугольник посередине.
+    Без этого KWin размывал бы весь прямоугольный bounding box, и по углам
+    капсулы торчали бы квадратные «уши» блюра за пределами скругления."""
+    radius = h / 2
+    region = QRegion(QRect(int(x + radius), int(y), int(max(0, w - 2 * radius)), int(h)))
+    region += QRegion(QRect(int(x), int(y), int(h), int(h)), QRegion.Ellipse)
+    region += QRegion(QRect(int(x + w - h), int(y), int(h), int(h)), QRegion.Ellipse)
+    return [(r.x(), r.y(), r.width(), r.height()) for r in region.rects()]
+
+
+def set_kwin_blur_region(win_id: int, rects):
+    """Просит компоузитор (KWin на Plasma) реально размывать рабочий стол
+    под окном в наборе прямоугольников rects=[(x, y, w, h), ...] в локальных
+    координатах окна. rects=None снимает блюр. Это нативный эффект KDE, а не
+    подделка — на других окружениях (не Plasma/KWin) просто не действует."""
+    display = _get_xlib_display()
+    if display is None:
+        return
+    try:
+        window = display.create_resource_object("window", win_id)
+        atom = display.intern_atom("_KDE_NET_WM_BLUR_BEHIND_REGION")
+        if not rects:
+            window.change_property(atom, Xatom.CARDINAL, 32, [])
+        else:
+            values = []
+            for x, y, w, h in rects:
+                values.extend([int(x), int(y), int(w), int(h)])
+            window.change_property(atom, Xatom.CARDINAL, 32, values)
+        display.flush()
+    except Exception as e:
+        log.debug("Не удалось обновить регион блюра KWin: %s", e)
 
 
 def _draw_mic(p: QPainter, cx: float, cy: float, color: str, scale: float = 1.0):
@@ -79,6 +139,27 @@ _THEMES = {
 def _theme_colors(theme, state):
     theme_map = _THEMES.get(theme, _THEMES["dark"])
     return theme_map.get(state, theme_map["recording"])
+
+
+# Палитра для формы "капсула" — тёплая (свет) / нейтрально-тёмная (тьма) подложка
+# с янтарной волной, независимо от состояния (запись/распознавание), как в
+# обычных приложениях голосовых заметок.
+_CAPSULE_THEMES = {
+    "light": {
+        "bg": QColor(245, 240, 231),
+        "text": QColor(96, 92, 84),
+        "wave": QColor(196, 120, 54),
+    },
+    "dark": {
+        "bg": QColor(22, 24, 29),
+        "text": QColor(158, 162, 170),
+        "wave": QColor(255, 176, 64),
+    },
+}
+
+
+def _capsule_colors(theme):
+    return _CAPSULE_THEMES.get(theme, _CAPSULE_THEMES["dark"])
 
 # Точки привязки оверлея: доля (fx, fy) свободного места на экране, куда сдвигать окно.
 POSITIONS = {
@@ -222,8 +303,11 @@ class PulseIndicator(QWidget):
             max_extent = max(0.0, outer_max - r_start)
 
             n_bars = self.N_BARS
-            bar_width = max(1.0, min(6.0, (2 * math.pi * r_start / n_bars) * 0.55))
-            alpha = max(0, min(255, int(70 + 170 * voice)))
+            # Более узкие столбики с заметным зазором между ними — иначе на
+            # малой громкости короткие "отдыхающие" полоски сливаются в
+            # сплошное красное кольцо вместо отдельных штрихов на белом.
+            bar_width = max(1.0, min(6.0, (2 * math.pi * r_start / n_bars) * 0.4))
+            alpha = max(0, min(255, int(40 + 190 * voice)))
             bar_color = QColor(colors["ring"])
             bar_color.setAlpha(alpha)
             pen = QPen(bar_color)
@@ -231,7 +315,7 @@ class PulseIndicator(QWidget):
             pen.setCapStyle(Qt.RoundCap)
             p.setPen(pen)
 
-            resting = max_extent * (0.05 + 0.03 * idle)
+            resting = max_extent * (0.03 + 0.02 * idle)
             for i in range(n_bars):
                 # У каждого луча своя пара частот/фаз (см. _make_bar_wobble) — без этого
                 # столбики "дышат" по общей формуле от индекса и выглядят одним узором,
@@ -252,12 +336,6 @@ class PulseIndicator(QWidget):
                 y2 = cy + r_end * math.sin(angle)
                 p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
-            # Бейдж под иконкой микрофона, слегка светлеет при громком голосе.
-            badge = QColor(colors["ring"])
-            badge.setAlpha(int(35 + 70 * voice))
-            p.setBrush(badge)
-            p.setPen(Qt.NoPen)
-            p.drawEllipse(QRectF(cx - base_r, cy - base_r, base_r * 2, base_r * 2))
             # Масштаб и смещение подобраны рендер-тестом по видимым краям иконки (bounding
             # box), чтобы отступы сверху и снизу внутри круга были одинаковыми.
             mic_scale = base_r / 162.0
@@ -321,6 +399,221 @@ class PulseIndicator(QWidget):
         p.restore()
 
 
+class CapsuleIndicator(QWidget):
+    """Горизонтальная капсула с «живым» эквалайзером и таймером записи —
+    альтернативная форма оверлея в стиле голосовых заметок."""
+
+    WIDTH = 240
+    HEIGHT = 76
+    SHADOW_MARGIN = 16
+    N_BARS = 24
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(self.WIDTH + 2 * self.SHADOW_MARGIN, self.HEIGHT + 2 * self.SHADOW_MARGIN)
+        self._state = "recording"
+        self._theme = "dark"
+        self._level = 0.0
+        self._phase = 0.0
+        self._elapsed = 0
+        self._bar_wobble = self._make_bar_wobble()
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(40)
+
+        # Настоящая мягкая размытая тень средствами Qt вместо ручных
+        # concentric-колец — те выглядели слоями, а не единым размытием.
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setOffset(0, 6)
+        shadow.setColor(QColor(0, 0, 0, 130))
+        self.setGraphicsEffect(shadow)
+
+    def _make_bar_wobble(self):
+        rng = random.Random(4242)
+        return [
+            {
+                "f1": rng.uniform(0.7, 1.9),
+                "f2": rng.uniform(1.8, 3.6),
+                "p1": rng.uniform(0, 2 * math.pi),
+                "p2": rng.uniform(0, 2 * math.pi),
+            }
+            for _ in range(self.N_BARS)
+        ]
+
+    def set_state(self, state):
+        self._state = state
+        self.update()
+
+    def set_theme(self, theme):
+        self._theme = theme if theme in _CAPSULE_THEMES else "dark"
+        self.update()
+
+    def set_level(self, level):
+        level = max(0.0, min(1.0, level))
+        self._level = self._level * 0.55 + level * 0.45
+
+    def set_elapsed(self, seconds):
+        self._elapsed = max(0, int(seconds))
+        self.update()
+
+    def _tick(self):
+        self._phase += 0.12
+        self.update()
+
+    def paintEvent(self, event):
+        colors = _capsule_colors(self._theme)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+
+        pill = QRectF(self.SHADOW_MARGIN, self.SHADOW_MARGIN, self.WIDTH, self.HEIGHT)
+        radius = self.HEIGHT / 2
+
+        self._draw_pill_background(p, pill, radius, colors)
+
+        if self._state == "recording":
+            self._draw_bars(p, pill, colors)
+        else:
+            self._draw_processing_wave(p, pill, colors)
+        self._draw_timer(p, pill, colors)
+
+        p.end()
+
+    def _draw_pill_background(self, p, pill, radius, colors):
+        """Обычная непрозрачная подложка. GlassCapsuleIndicator переопределяет
+        этот метод, оставляя вместо заливки лишь лёгкую тонировку — сам блюр
+        того, что под окном, делает композитор (KWin), а не мы."""
+        p.setBrush(QBrush(colors["bg"]))
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(pill, radius, radius)
+
+    def _draw_bars(self, p, pill, colors):
+        pad_left = pill.height() * 0.42
+        wave_w = pill.width() * 0.5
+        cy = pill.center().y()
+        max_h = pill.height() * 0.6
+
+        n = self.N_BARS
+        spacing = wave_w / n
+        bar_w = max(2.0, min(4.0, spacing * 0.55))
+        voice = self._level
+
+        pen = QPen(colors["wave"])
+        pen.setWidthF(bar_w)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+
+        resting = max_h * 0.08
+        for i in range(n):
+            w = self._bar_wobble[i]
+            wobble = 0.5 + 0.5 * (
+                0.6 * math.sin(self._phase * w["f1"] + w["p1"])
+                + 0.4 * math.sin(self._phase * w["f2"] + w["p2"])
+            )
+            wobble = max(0.0, min(1.0, wobble))
+            bar_h = resting + wobble * voice * max_h * 2.2
+            bar_h = min(max_h, bar_h)
+
+            x = pill.left() + pad_left + spacing * (i + 0.5)
+            p.drawLine(QPointF(x, cy - bar_h / 2), QPointF(x, cy + bar_h / 2))
+
+    def _draw_processing_wave(self, p, pill, colors):
+        """Текущая синусоида вместо эквалайзера — визуально явно отличает
+        «идёт распознавание» от живой реакции на голос при записи. Огибающая
+        зафиксирована (выше в центре, ниже к краям капсулы), бежит только
+        сама волна — так линия никогда не становится плоской."""
+        pad_left = pill.height() * 0.42
+        wave_w = pill.width() * 0.5
+        cy = pill.center().y()
+        amplitude = pill.height() * 0.22
+        freq = 2.6
+
+        n_points = 48
+        path = QPainterPath()
+        for i in range(n_points + 1):
+            t = i / n_points
+            x = pill.left() + pad_left + t * wave_w
+            envelope = math.sin(math.pi * t)
+            y = cy + amplitude * envelope * math.sin(2 * math.pi * freq * t - self._phase * 2.8)
+            if i == 0:
+                path.moveTo(x, y)
+            else:
+                path.lineTo(x, y)
+
+        pen = QPen(colors["wave"])
+        pen.setWidthF(max(2.5, pill.height() * 0.05))
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+
+    def _draw_timer(self, p, pill, colors):
+        minutes, seconds = divmod(self._elapsed, 60)
+        text = f"{minutes}:{seconds:02d}"
+
+        font = QFont("monospace")
+        font.setBold(False)
+        font.setPixelSize(max(10, int(pill.height() * 0.26)))
+        p.setFont(font)
+        p.setPen(colors["text"])
+
+        text_rect = QRectF(
+            pill.left() + pill.height() * 0.42 + pill.width() * 0.5 + 8,
+            pill.top(),
+            pill.right() - (pill.left() + pill.height() * 0.42 + pill.width() * 0.5 + 8) - pill.height() * 0.3,
+            pill.height(),
+        )
+        p.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
+
+
+# Тонировка стекла — чистый белый/почти чёрный, а не мутно-серый: живой цвет
+# схемы KDE оказался «грязным» на глаз и, что хуже, не менялся вместе с
+# выбором темы оверлея (тёмная/светлая), потому что читался из системы, а не
+# из наших настроек. Теперь тонировка снова зависит от темы оверлея.
+_GLASS_TINT = {
+    "light": QColor(255, 255, 255),
+    "dark": QColor(14, 15, 18),
+}
+
+
+class GlassCapsuleIndicator(CapsuleIndicator):
+    """Та же капсула, но подложка — не сплошная заливка, а лёгкая тонировка
+    поверх настоящего блюра KWin (см. set_kwin_blur_region): рабочий стол
+    под окном размывает сам компоузитор, мы только тонируем и добавляем
+    блик/ободок для стеклянного вида."""
+
+    def _draw_pill_background(self, p, pill, radius, colors):
+        pill_path = QPainterPath()
+        pill_path.addRoundedRect(pill, radius, radius)
+
+        tint = QColor(_GLASS_TINT.get(self._theme, _GLASS_TINT["dark"]))
+        tint.setAlpha(60 if self._theme == "light" else 95)
+        p.save()
+        p.setClipPath(pill_path)
+        p.fillRect(pill, tint)
+        p.restore()
+
+        # Блик растягиваем на всю капсулу (не только верхнюю часть) — иначе
+        # там, где заканчивался прямоугольник блика, был виден шов/полоса:
+        # градиент ещё не успевал погаснуть до нуля, а прямоугольник уже
+        # обрывался.
+        grad = QRadialGradient(pill.center().x(), pill.top(), pill.width() * 0.7)
+        grad.setColorAt(0.0, QColor(255, 255, 255, 60))
+        grad.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.save()
+        p.setClipPath(pill_path)
+        p.setBrush(QBrush(grad))
+        p.setPen(Qt.NoPen)
+        p.drawRect(pill)
+        p.restore()
+
+        rim = QPen(QColor(255, 255, 255, 70), 1.2)
+        p.setPen(rim)
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(pill.adjusted(0.6, 0.6, -0.6, -0.6), radius, radius)
+
+
 class OverlayWindow(QWidget):
     """Небольшой оверлей по центру экрана, сигнализирующий о записи/обработке."""
 
@@ -341,8 +634,14 @@ class OverlayWindow(QWidget):
         layout.setSpacing(12)
         layout.setAlignment(Qt.AlignHCenter)
 
-        self.indicator = PulseIndicator(self)
-        layout.addWidget(self.indicator, 0, Qt.AlignHCenter)
+        self._circle = PulseIndicator(self)
+        self._capsule = CapsuleIndicator(self)
+        self._capsule_glass = GlassCapsuleIndicator(self)
+        self._capsule.hide()
+        self._capsule_glass.hide()
+        layout.addWidget(self._circle, 0, Qt.AlignHCenter)
+        layout.addWidget(self._capsule, 0, Qt.AlignHCenter)
+        layout.addWidget(self._capsule_glass, 0, Qt.AlignHCenter)
 
         self.text_label = QLabel(self)
         self.text_label.setWordWrap(True)
@@ -354,15 +653,34 @@ class OverlayWindow(QWidget):
         self._show_text = False
         self._position = "center"
         self._theme = "dark"
+        self._shape = "circle"
         self._apply_label_style()
+
+    @property
+    def indicator(self):
+        if self._shape == "capsule":
+            return self._capsule
+        if self._shape == "capsule_glass":
+            return self._capsule_glass
+        return self._circle
 
     def set_position(self, position):
         self._position = position if position in POSITIONS else "center"
 
     def set_theme(self, theme):
         self._theme = theme if theme in _THEMES else "dark"
-        self.indicator.set_theme(self._theme)
+        self._circle.set_theme(self._theme)
+        self._capsule.set_theme(self._theme)
+        self._capsule_glass.set_theme(self._theme)
         self._apply_label_style()
+
+    def set_shape(self, shape):
+        self._shape = shape if shape in ("circle", "capsule", "capsule_glass") else "circle"
+        self._circle.setVisible(self._shape == "circle")
+        self._capsule.setVisible(self._shape == "capsule")
+        self._capsule_glass.setVisible(self._shape == "capsule_glass")
+        if self._shape != "capsule_glass":
+            self._clear_blur_region()
 
     def _apply_label_style(self):
         if self._theme == "light":
@@ -398,10 +716,27 @@ class OverlayWindow(QWidget):
     def show_recording(self):
         self.indicator.set_state("recording")
         self.indicator.set_level(0.0)
+        if hasattr(self.indicator, "set_elapsed"):
+            self.indicator.set_elapsed(0)
         if self._show_text:
             self.text_label.setText("")
             self.text_label.show()
         self._recenter_and_show()
+
+    def _update_blur_region(self):
+        if self._shape != "capsule_glass":
+            return
+        win_id = int(self.winId())
+        margin = self._capsule_glass.SHADOW_MARGIN
+        x = self._capsule_glass.x() + margin
+        y = self._capsule_glass.y() + margin
+        rects = _stadium_region_rects(x, y, self._capsule_glass.WIDTH, self._capsule_glass.HEIGHT)
+        set_kwin_blur_region(win_id, rects)
+
+    def _clear_blur_region(self):
+        if not self.testAttribute(Qt.WA_WState_Created):
+            return
+        set_kwin_blur_region(int(self.winId()), None)
 
     def show_transcribing(self):
         self.indicator.set_state("transcribing")
@@ -410,26 +745,41 @@ class OverlayWindow(QWidget):
     def set_level(self, level):
         self.indicator.set_level(level)
 
+    def set_elapsed(self, seconds):
+        if hasattr(self.indicator, "set_elapsed"):
+            self.indicator.set_elapsed(seconds)
+
     def set_partial_text(self, text):
         if self._show_text:
             self.text_label.setText(text)
             self._recenter_and_show()
 
     def hide_overlay(self):
+        self._clear_blur_region()
         self.hide()
         self.text_label.setText("")
 
+    def _compute_position(self):
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return None
+        geo = screen.availableGeometry()
+        margin = 24
+        fx, fy = POSITIONS.get(self._position, POSITIONS["center"])
+        avail_w = max(0, geo.width() - self.width() - 2 * margin)
+        avail_h = max(0, geo.height() - self.height() - 2 * margin)
+        x = geo.x() + margin + int(fx * avail_w)
+        y = geo.y() + margin + int(fy * avail_h)
+        return x, y
+
     def _recenter_and_show(self):
         self.adjustSize()
-        screen = QApplication.primaryScreen()
-        if screen is not None:
-            geo = screen.availableGeometry()
-            margin = 24
-            fx, fy = POSITIONS.get(self._position, POSITIONS["center"])
-            avail_w = max(0, geo.width() - self.width() - 2 * margin)
-            avail_h = max(0, geo.height() - self.height() - 2 * margin)
-            x = geo.x() + margin + int(fx * avail_w)
-            y = geo.y() + margin + int(fy * avail_h)
-            self.move(x, y)
+        pos = self._compute_position()
+        if pos is not None:
+            self.move(*pos)
         self.show()
         self.raise_()
+        # Регион блюра — в локальных координатах окна, поэтому обновляем его
+        # каждый раз, когда меняется размер/раскладка (например, показался
+        # или изменился текст живой транскрипции над капсулой).
+        self._update_blur_region()

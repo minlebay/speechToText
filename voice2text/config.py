@@ -21,6 +21,7 @@ DEFAULTS = {
     "realtime_transcription": False,
     "overlay_position": "center",
     "overlay_theme": "dark",
+    "overlay_shape": "circle",
     "tray_icon_monochrome": False,
     "tray_icon_mono_variant": "auto",
 }

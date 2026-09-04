@@ -99,6 +99,12 @@ _OVERLAY_THEMES = [
     ("light", "Светлая"),
 ]
 
+_OVERLAY_SHAPES = [
+    ("circle", "Круг"),
+    ("capsule", "Капсула"),
+    ("capsule_glass", "Капсула (стекло KWin)"),
+]
+
 _TRAY_MONO_VARIANTS = [
     ("auto", "Авто (по цвету панели)"),
     ("light", "Светлая (для тёмных панелей)"),
@@ -238,11 +244,21 @@ class SettingsDialog(QDialog):
         self.overlay_theme_combo.setCurrentIndex(idx if idx >= 0 else 0)
         form.addRow("Тема оверлея:", self.overlay_theme_combo)
 
+        self.overlay_shape_combo = QComboBox()
+        for value, label in _OVERLAY_SHAPES:
+            self.overlay_shape_combo.addItem(label, value)
+        current_shape = config.get("overlay_shape", "circle")
+        idx = self.overlay_shape_combo.findData(current_shape)
+        self.overlay_shape_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        form.addRow("Форма оверлея:", self.overlay_shape_combo)
+
         self.overlay_checkbox.toggled.connect(self._update_realtime_availability)
         self.overlay_checkbox.toggled.connect(self.overlay_position_combo.setEnabled)
         self.overlay_checkbox.toggled.connect(self.overlay_theme_combo.setEnabled)
+        self.overlay_checkbox.toggled.connect(self.overlay_shape_combo.setEnabled)
         self.overlay_position_combo.setEnabled(self.overlay_checkbox.isChecked())
         self.overlay_theme_combo.setEnabled(self.overlay_checkbox.isChecked())
+        self.overlay_shape_combo.setEnabled(self.overlay_checkbox.isChecked())
         self._update_realtime_availability(self.overlay_checkbox.isChecked())
 
         self.tray_mono_checkbox = QCheckBox("Монохромная иконка в трее")
@@ -305,6 +321,7 @@ class SettingsDialog(QDialog):
             "realtime_transcription": self.overlay_checkbox.isChecked() and self.realtime_checkbox.isChecked(),
             "overlay_position": self.overlay_position_combo.currentData(),
             "overlay_theme": self.overlay_theme_combo.currentData(),
+            "overlay_shape": self.overlay_shape_combo.currentData(),
             "tray_icon_monochrome": self.tray_mono_checkbox.isChecked(),
             "tray_icon_mono_variant": self.tray_mono_variant_combo.currentData(),
         }
@@ -327,7 +344,9 @@ class App:
         self.overlay = OverlayWindow()
         self.overlay.set_position(self.config.get("overlay_position", "center"))
         self.overlay.set_theme(self.config.get("overlay_theme", "dark"))
+        self.overlay.set_shape(self.config.get("overlay_shape", "circle"))
         self._partial_in_progress = False
+        self._record_start_time = None
         self._level_timer = QTimer()
         self._level_timer.setInterval(80)
         self._level_timer.timeout.connect(self._update_level)
@@ -450,6 +469,7 @@ class App:
             self.tray.setToolTip("Voice2Text — Запись...")
             self.tray.showMessage("Voice2Text", "Запись...", QSystemTrayIcon.Information, 1500)
 
+            self._record_start_time = time.time()
             if self.config.get("show_overlay"):
                 self.overlay.set_text_enabled(self.config.get("realtime_transcription", False))
                 self.overlay.show_recording()
@@ -514,6 +534,8 @@ class App:
     def _update_level(self):
         pcm = self.recorder.read_level_window()
         self.overlay.set_level(compute_level(pcm))
+        if self._record_start_time is not None:
+            self.overlay.set_elapsed(time.time() - self._record_start_time)
 
     def _trigger_partial_transcription(self):
         if self._partial_in_progress or self.state != "recording":
@@ -579,6 +601,7 @@ class App:
                 self.device_monitor.set_device(new_config.get("audio_device"))
             self.overlay.set_position(new_config.get("overlay_position", "center"))
             self.overlay.set_theme(new_config.get("overlay_theme", "dark"))
+            self.overlay.set_shape(new_config.get("overlay_shape", "circle"))
             self.tray.setIcon(self._tray_icon(self.state))
 
 
