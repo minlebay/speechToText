@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QMenu,
     QPushButton,
+    QSlider,
     QSystemTrayIcon,
     QVBoxLayout,
 )
@@ -252,13 +253,28 @@ class SettingsDialog(QDialog):
         self.overlay_shape_combo.setCurrentIndex(idx if idx >= 0 else 0)
         form.addRow("Форма оверлея:", self.overlay_shape_combo)
 
+        glass_opacity_row = QHBoxLayout()
+        self.glass_opacity_slider = QSlider(Qt.Horizontal)
+        self.glass_opacity_slider.setRange(0, 100)
+        self.glass_opacity_slider.setValue(config.get("overlay_glass_opacity", 30))
+        self.glass_opacity_label = QLabel(f"{self.glass_opacity_slider.value()}%")
+        self.glass_opacity_label.setMinimumWidth(36)
+        self.glass_opacity_slider.valueChanged.connect(
+            lambda v: self.glass_opacity_label.setText(f"{v}%")
+        )
+        glass_opacity_row.addWidget(self.glass_opacity_slider)
+        glass_opacity_row.addWidget(self.glass_opacity_label)
+        form.addRow("Прозрачность стекла:", glass_opacity_row)
+
         self.overlay_checkbox.toggled.connect(self._update_realtime_availability)
         self.overlay_checkbox.toggled.connect(self.overlay_position_combo.setEnabled)
         self.overlay_checkbox.toggled.connect(self.overlay_theme_combo.setEnabled)
         self.overlay_checkbox.toggled.connect(self.overlay_shape_combo.setEnabled)
+        self.overlay_checkbox.toggled.connect(self.glass_opacity_slider.setEnabled)
         self.overlay_position_combo.setEnabled(self.overlay_checkbox.isChecked())
         self.overlay_theme_combo.setEnabled(self.overlay_checkbox.isChecked())
         self.overlay_shape_combo.setEnabled(self.overlay_checkbox.isChecked())
+        self.glass_opacity_slider.setEnabled(self.overlay_checkbox.isChecked())
         self._update_realtime_availability(self.overlay_checkbox.isChecked())
 
         self.tray_mono_checkbox = QCheckBox("Монохромная иконка в трее")
@@ -322,6 +338,7 @@ class SettingsDialog(QDialog):
             "overlay_position": self.overlay_position_combo.currentData(),
             "overlay_theme": self.overlay_theme_combo.currentData(),
             "overlay_shape": self.overlay_shape_combo.currentData(),
+            "overlay_glass_opacity": self.glass_opacity_slider.value(),
             "tray_icon_monochrome": self.tray_mono_checkbox.isChecked(),
             "tray_icon_mono_variant": self.tray_mono_variant_combo.currentData(),
         }
@@ -345,6 +362,7 @@ class App:
         self.overlay.set_position(self.config.get("overlay_position", "center"))
         self.overlay.set_theme(self.config.get("overlay_theme", "dark"))
         self.overlay.set_shape(self.config.get("overlay_shape", "circle"))
+        self.overlay.set_glass_opacity(self.config.get("overlay_glass_opacity", 30))
         self._partial_in_progress = False
         self._record_start_time = None
         self._level_timer = QTimer()
@@ -602,6 +620,7 @@ class App:
             self.overlay.set_position(new_config.get("overlay_position", "center"))
             self.overlay.set_theme(new_config.get("overlay_theme", "dark"))
             self.overlay.set_shape(new_config.get("overlay_shape", "circle"))
+            self.overlay.set_glass_opacity(new_config.get("overlay_glass_opacity", 30))
             self.tray.setIcon(self._tray_icon(self.state))
 
 

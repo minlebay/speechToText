@@ -583,12 +583,22 @@ class GlassCapsuleIndicator(CapsuleIndicator):
     под окном размывает сам компоузитор, мы только тонируем и добавляем
     блик/ободок для стеклянного вида."""
 
+    DEFAULT_OPACITY_PERCENT = 30
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._opacity_percent = self.DEFAULT_OPACITY_PERCENT
+
+    def set_opacity(self, percent):
+        self._opacity_percent = max(0, min(100, int(percent)))
+        self.update()
+
     def _draw_pill_background(self, p, pill, radius, colors):
         pill_path = QPainterPath()
         pill_path.addRoundedRect(pill, radius, radius)
 
         tint = QColor(_GLASS_TINT.get(self._theme, _GLASS_TINT["dark"]))
-        tint.setAlpha(60 if self._theme == "light" else 95)
+        tint.setAlpha(round(self._opacity_percent / 100 * 255))
         p.save()
         p.setClipPath(pill_path)
         p.fillRect(pill, tint)
@@ -681,6 +691,9 @@ class OverlayWindow(QWidget):
         self._capsule_glass.setVisible(self._shape == "capsule_glass")
         if self._shape != "capsule_glass":
             self._clear_blur_region()
+
+    def set_glass_opacity(self, percent):
+        self._capsule_glass.set_opacity(percent)
 
     def _apply_label_style(self):
         if self._theme == "light":

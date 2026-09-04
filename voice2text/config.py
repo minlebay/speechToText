@@ -22,6 +22,7 @@ DEFAULTS = {
     "overlay_position": "center",
     "overlay_theme": "dark",
     "overlay_shape": "circle",
+    "overlay_glass_opacity": 30,
     "tray_icon_monochrome": False,
     "tray_icon_mono_variant": "auto",
 }
