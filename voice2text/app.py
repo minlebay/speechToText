@@ -66,7 +66,7 @@ def _list_pulse_sources():
     except Exception:
         pass
     return []
-from voice2text.transcriber import transcribe
+from voice2text.transcriber import transcribe, unload_whisper_model
 
 
 def _is_source_muted(source_name=None):
@@ -609,8 +609,11 @@ class App:
             new_config = dialog.get_config()
             old_hotkey = self.config["hotkey"]
             old_device = self.config.get("audio_device")
+            old_backend = self.config.get("backend", "whisper")
             self.config = new_config
             save_config(new_config)
+            if old_backend == "whisper" and new_config.get("backend") != "whisper":
+                unload_whisper_model()
             if new_config["hotkey"] != old_hotkey:
                 self._stop_hotkey_listener()
                 self._start_hotkey_listener()

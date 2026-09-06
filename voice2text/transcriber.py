@@ -10,6 +10,7 @@ _whisper_model_name = None
 def _get_whisper_model(model_name):
     global _whisper_model, _whisper_model_name
     if _whisper_model is None or _whisper_model_name != model_name:
+        unload_whisper_model()
         from faster_whisper import WhisperModel
 
         log.info("Загрузка модели faster-whisper '%s'...", model_name)
@@ -17,6 +18,17 @@ def _get_whisper_model(model_name):
         _whisper_model_name = model_name
         log.info("Модель загружена")
     return _whisper_model
+
+
+def unload_whisper_model():
+    global _whisper_model, _whisper_model_name
+    if _whisper_model is not None:
+        log.info("Выгрузка модели faster-whisper '%s' из памяти", _whisper_model_name)
+        _whisper_model = None
+        _whisper_model_name = None
+        import gc
+
+        gc.collect()
 
 
 def transcribe_whisper(audio_wav, language="ru", model_name="base"):
