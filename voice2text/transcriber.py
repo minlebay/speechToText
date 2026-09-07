@@ -65,20 +65,37 @@ def transcribe_gemini(audio_wav, api_key, language="ru", model="gemini-3.8-flash
         )
         client = genai.Client(api_key=api_key)
 
-        prompt = (
-            f"Transcribe this audio exactly as spoken. "
-            f"The primary language is {language}, but the speaker may mix in "
-            f"other languages (e.g. English technical terms). "
-            f"Preserve each word in its original language. "
-            f"Output only the transcription text, nothing else."
-        )
         if sanitize_fillers:
-            prompt += (
-                " Remove filler words and hesitation sounds (e.g. 'э', 'э-э', 'ну', "
-                "'типа', 'как бы', 'короче', 'это самое', 'в общем', 'um', 'uh'), "
-                "false starts, and stuttered word repetitions. "
-                "Do not change the meaning, do not add or omit any actual information, "
-                "do not paraphrase or summarize — only remove disfluencies."
+            prompt = (
+                f"Transcribe this audio. "
+                f"The primary language is {language}, but the speaker may mix in "
+                f"other languages (e.g. English technical terms). "
+                f"Preserve each word in its original language. "
+                f"Aggressively clean the transcript of verbal disfluencies in whatever "
+                f"language is spoken: remove ALL filler words and hesitation sounds, no "
+                f"matter where they occur in the sentence. In Russian this includes 'э', "
+                f"'э-э', 'эм', 'ну', 'вот', 'это', 'это самое', 'так сказать', 'собственно', "
+                f"'собственно говоря', 'значит', 'короче', 'короче говоря', 'типа', "
+                f"'как бы', 'в общем', 'в общем-то', 'в принципе', 'получается', 'как его', "
+                f"'ну вот'. In English this includes 'um', 'uh', 'uh huh', 'er', 'like', "
+                f"'you know', 'I mean', 'well', 'so', 'right', 'okay so', 'actually', "
+                f"'basically', 'kind of', 'sort of', 'just', 'literally' (used as a filler), "
+                f"'anyway'. Apply the same aggressive removal to filler words in any other "
+                f"language present in the audio. Also remove false starts, stutters, "
+                f"immediate word/phrase repetitions, and self-corrections (keep only the "
+                f"final corrected version). "
+                f"Do not change the meaning, do not add or omit any actual information, "
+                f"do not paraphrase or summarize — only strip disfluencies so the result "
+                f"reads as clean, fluent speech. "
+                f"Output only the transcription text, nothing else."
+            )
+        else:
+            prompt = (
+                f"Transcribe this audio exactly as spoken. "
+                f"The primary language is {language}, but the speaker may mix in "
+                f"other languages (e.g. English technical terms). "
+                f"Preserve each word in its original language. "
+                f"Output only the transcription text, nothing else."
             )
 
         audio_part = types.Part.from_bytes(data=audio_wav, mime_type="audio/wav")
