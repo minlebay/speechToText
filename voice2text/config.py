@@ -10,6 +10,7 @@ LOG_FILE = os.path.join(CONFIG_DIR, "voice2text.log")
 
 DEFAULTS = {
     "hotkey": "<ctrl>+<shift>+h",
+    "code_hotkey": "<ctrl>+<alt>+c",
     "output_mode": "paste",
     "language": "ru",
     "backend": "whisper",

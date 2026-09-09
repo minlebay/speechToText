@@ -124,6 +124,71 @@ def transcribe_gemini(audio_wav, api_key, language="ru", model="gemini-3.8-flash
         raise RuntimeError(f"Ошибка транскрипции: {e}") from e
 
 
+def transcribe_gemini_code(audio_wav, api_key, model="gemini-3.8-flash", context_code=""):
+    try:
+        from google import genai
+        from google.genai import types
+
+        log.info(
+            "Gemini code-mode транскрипция (%d байт, модель=%s, контекст=%d символов)",
+            len(audio_wav), model, len(context_code),
+        )
+        client = genai.Client(api_key=api_key)
+
+        context_block = ""
+        if context_code.strip():
+            context_block = (
+                "The user currently has the following text/code selected in their "
+                "editor — it is the context the spoken instruction refers to (e.g. "
+                "a variable or collection name, or a code snippet to refactor). "
+                "Reuse its exact names, types and style where relevant; incorporate "
+                "it into the generated code as implied by the instruction, but do not "
+                "repeat it verbatim unless the instruction asks for that.\n"
+                f"Selected context:\n{context_code.strip()}\n\n"
+            )
+
+        prompt = (
+            f"{context_block}"
+            "The audio is a spoken coding instruction in English, for example "
+            "'write in Go a loop over a variable named x' or "
+            "'in SQL, select username joined with the department table'. "
+            "Identify the target programming language or SQL dialect from the "
+            "instruction. If none is stated explicitly, infer the most fitting "
+            "one from context (e.g. SQL for database queries). "
+            "Generate only the code that implements what was asked, in that "
+            "language. Output raw code only — no markdown code fences, no "
+            "explanations, no comments about which language was used."
+        )
+
+        audio_part = types.Part.from_bytes(data=audio_wav, mime_type="audio/wav")
+
+        gen_config = None
+        if "2.5" in model or "3.5" in model:
+            gen_config = types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            )
+
+        response = client.models.generate_content(
+            model=model,
+            contents=[prompt, audio_part],
+            config=gen_config,
+        )
+
+        result = response.text.strip().strip("`\n")
+        lines = result.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        result = "\n".join(lines).strip()
+
+        log.info("Код сгенерирован: %d символов", len(result))
+        return result
+    except Exception as e:
+        log.error("Ошибка Gemini code-mode транскрипции: %s", e)
+        raise RuntimeError(f"Ошибка генерации кода: {e}") from e
+
+
 def transcribe_google_stt(audio_wav, language="ru"):
     try:
         from google.cloud import speech

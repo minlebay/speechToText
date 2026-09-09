@@ -66,7 +66,23 @@ def _list_pulse_sources():
     except Exception:
         pass
     return []
-from voice2text.transcriber import transcribe, unload_whisper_model
+from voice2text.transcriber import transcribe, transcribe_gemini_code, unload_whisper_model
+
+
+def _get_selected_text():
+    """Читает текущее X11 PRIMARY-выделение (обновляется автоматически при
+    выделении текста мышью/клавиатурой, без имитации Ctrl+C — синтетический
+    Ctrl+C небезопасен, например в терминале это SIGINT, а не копирование)."""
+    try:
+        r = subprocess.run(
+            ["xclip", "-o", "-selection", "primary"],
+            capture_output=True, text=True, timeout=1,
+        )
+        if r.returncode == 0:
+            return r.stdout
+    except Exception:
+        pass
+    return ""
 
 
 def _is_source_muted(source_name=None):
@@ -115,6 +131,7 @@ _TRAY_MONO_VARIANTS = [
 
 class SignalBridge(QObject):
     toggle_recording = pyqtSignal()
+    toggle_code_recording = pyqtSignal()
     transcription_ready = pyqtSignal(str)
     partial_transcription_ready = pyqtSignal(str)
     error = pyqtSignal(str)
@@ -182,6 +199,9 @@ class SettingsDialog(QDialog):
 
         self.hotkey_edit = QLineEdit(config["hotkey"])
         form.addRow("Горячая клавиша:", self.hotkey_edit)
+
+        self.code_hotkey_edit = QLineEdit(config.get("code_hotkey", "<ctrl>+<alt>+c"))
+        form.addRow("Горячая клавиша (режим кода):", self.code_hotkey_edit)
 
         self.output_combo = QComboBox()
         self.output_combo.addItems(["paste", "clipboard"])
@@ -326,6 +346,7 @@ class SettingsDialog(QDialog):
     def get_config(self):
         return {
             "hotkey": self.hotkey_edit.text(),
+            "code_hotkey": self.code_hotkey_edit.text(),
             "output_mode": self.output_combo.currentText(),
             "language": self.language_edit.text(),
             "backend": self.backend_combo.currentText(),
@@ -353,6 +374,8 @@ class App:
         self.recorder = Recorder(device=self.config.get("audio_device"))
         self.signals = SignalBridge()
         self._mic_muted = False
+        self._code_mode = False
+        self._code_selection = ""
         self.device_monitor = DeviceMonitor(device=self.config.get("audio_device"))
         self.tray = QSystemTrayIcon(self._tray_icon("idle"))
         self.tray.setToolTip("Voice2Text — Готов")
@@ -380,7 +403,8 @@ class App:
         self.tray.setContextMenu(menu)
         self.tray.show()
 
-        self.signals.toggle_recording.connect(self._on_toggle)
+        self.signals.toggle_recording.connect(lambda: self._on_toggle(code_mode=False))
+        self.signals.toggle_code_recording.connect(lambda: self._on_toggle(code_mode=True))
         self.signals.transcription_ready.connect(self._on_transcription)
         self.signals.partial_transcription_ready.connect(self._on_partial_transcription)
         self.signals.error.connect(self._on_error)
@@ -420,45 +444,48 @@ class App:
         tooltip_suffix = " (микрофон заглушен)" if muted else ""
         self.tray.setToolTip(self.tray.toolTip().split(" (микрофон")[0] + tooltip_suffix)
 
-    def _start_hotkey_listener(self):
+    def _validate_hotkey(self, hotkey, default, config_key):
         from pynput.keyboard import GlobalHotKeys
 
-        hotkey = self.config["hotkey"]
         try:
-            log.info("Регистрация горячей клавиши: %s", hotkey)
-            self._hotkey_listener = GlobalHotKeys(
-                {hotkey: lambda: self.signals.toggle_recording.emit()}
-            )
-            self._hotkey_listener.daemon = True
-            self._hotkey_listener.start()
+            GlobalHotKeys({hotkey: lambda: None})
+            return hotkey
         except (ValueError, KeyError) as e:
-            default_hotkey = "<ctrl>+<alt>+h"
-            log.error("Неверная горячая клавиша '%s': %s, откат на %s", hotkey, e, default_hotkey)
+            log.error("Неверная горячая клавиша '%s': %s, откат на %s", hotkey, e, default)
             self.tray.showMessage(
                 "Voice2Text",
-                f"Неверная горячая клавиша \"{hotkey}\", используется {default_hotkey}",
+                f"Неверная горячая клавиша \"{hotkey}\", используется {default}",
                 QSystemTrayIcon.Warning,
                 5000,
             )
-            self.config["hotkey"] = default_hotkey
+            self.config[config_key] = default
             save_config(self.config)
-            self._hotkey_listener = GlobalHotKeys(
-                {default_hotkey: lambda: self.signals.toggle_recording.emit()}
-            )
-            self._hotkey_listener.daemon = True
-            self._hotkey_listener.start()
+            return default
+
+    def _start_hotkey_listener(self):
+        from pynput.keyboard import GlobalHotKeys
+
+        hotkey = self._validate_hotkey(self.config["hotkey"], "<ctrl>+<alt>+h", "hotkey")
+        code_hotkey = self._validate_hotkey(
+            self.config.get("code_hotkey", "<ctrl>+<alt>+c"), "<ctrl>+<alt>+c", "code_hotkey"
+        )
+        log.info("Регистрация горячих клавиш: %s (запись), %s (код)", hotkey, code_hotkey)
+        self._hotkey_listener = GlobalHotKeys({
+            hotkey: lambda: self.signals.toggle_recording.emit(),
+            code_hotkey: lambda: self.signals.toggle_code_recording.emit(),
+        })
+        self._hotkey_listener.daemon = True
+        self._hotkey_listener.start()
 
     def _stop_hotkey_listener(self):
         if hasattr(self, "_hotkey_listener"):
             self._hotkey_listener.stop()
 
-    def _on_toggle(self):
-        log.debug("Хоткей нажат, текущее состояние: %s", self.state)
+    def _on_toggle(self, code_mode=False):
+        log.debug("Хоткей нажат, текущее состояние: %s, code_mode=%s", self.state, code_mode)
         if self.state == "idle":
-            backend = self.config.get("backend", "whisper")
-            if backend == "gemini":
-                api_key = get_api_key()
-                if not api_key:
+            if code_mode:
+                if not get_api_key():
                     self.tray.showMessage(
                         "Voice2Text",
                         "API ключ не установлен. Задайте переменную окружения GEMINI_API_KEY_TTS.",
@@ -466,16 +493,28 @@ class App:
                         3000,
                     )
                     return
-            elif backend == "google_stt":
-                import os
-                if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
-                    self.tray.showMessage(
-                        "Voice2Text",
-                        "Не задан GOOGLE_APPLICATION_CREDENTIALS. Укажите путь к JSON сервисного аккаунта.",
-                        QSystemTrayIcon.Warning,
-                        3000,
-                    )
-                    return
+            else:
+                backend = self.config.get("backend", "whisper")
+                if backend == "gemini":
+                    api_key = get_api_key()
+                    if not api_key:
+                        self.tray.showMessage(
+                            "Voice2Text",
+                            "API ключ не установлен. Задайте переменную окружения GEMINI_API_KEY_TTS.",
+                            QSystemTrayIcon.Warning,
+                            3000,
+                        )
+                        return
+                elif backend == "google_stt":
+                    import os
+                    if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+                        self.tray.showMessage(
+                            "Voice2Text",
+                            "Не задан GOOGLE_APPLICATION_CREDENTIALS. Укажите путь к JSON сервисного аккаунта.",
+                            QSystemTrayIcon.Warning,
+                            3000,
+                        )
+                        return
             try:
                 self.recorder.start()
             except RuntimeError as e:
@@ -483,9 +522,12 @@ class App:
                 self.tray.showMessage("Voice2Text — Ошибка", str(e), QSystemTrayIcon.Critical, 5000)
                 return
             self.state = "recording"
+            self._code_mode = code_mode
+            self._code_selection = _get_selected_text() if code_mode else ""
             self.tray.setIcon(self._tray_icon("recording"))
-            self.tray.setToolTip("Voice2Text — Запись...")
-            self.tray.showMessage("Voice2Text", "Запись...", QSystemTrayIcon.Information, 1500)
+            status = "Запись кода..." if code_mode else "Запись..."
+            self.tray.setToolTip(f"Voice2Text — {status}")
+            self.tray.showMessage("Voice2Text", status, QSystemTrayIcon.Information, 1500)
 
             self._record_start_time = time.time()
             if self.config.get("show_overlay"):
@@ -504,21 +546,35 @@ class App:
             if self.config.get("show_overlay"):
                 self.overlay.show_transcribing()
 
-            language = self.config["language"]
-            backend = self.config.get("backend", "whisper")
-            api_key = get_api_key() if backend == "gemini" else ""
-            whisper_model = self.config.get("whisper_model", "base")
-            gemini_model = self.config.get("gemini_model", "gemini-3.8-flash")
-            sanitize_fillers = backend == "gemini" and self.config.get("sanitize_fillers", False)
+            if self._code_mode:
+                api_key = get_api_key()
+                gemini_model = self.config.get("gemini_model", "gemini-3.8-flash")
 
-            def worker():
-                try:
-                    text = transcribe(audio_data, language=language, backend=backend,
-                                      api_key=api_key, whisper_model=whisper_model,
-                                      gemini_model=gemini_model, sanitize_fillers=sanitize_fillers)
-                    self.signals.transcription_ready.emit(text)
-                except Exception as e:
-                    self.signals.error.emit(str(e))
+                context_code = self._code_selection
+
+                def worker():
+                    try:
+                        text = transcribe_gemini_code(audio_data, api_key=api_key, model=gemini_model,
+                                                       context_code=context_code)
+                        self.signals.transcription_ready.emit(text)
+                    except Exception as e:
+                        self.signals.error.emit(str(e))
+            else:
+                language = self.config["language"]
+                backend = self.config.get("backend", "whisper")
+                api_key = get_api_key() if backend == "gemini" else ""
+                whisper_model = self.config.get("whisper_model", "base")
+                gemini_model = self.config.get("gemini_model", "gemini-3.8-flash")
+                sanitize_fillers = backend == "gemini" and self.config.get("sanitize_fillers", False)
+
+                def worker():
+                    try:
+                        text = transcribe(audio_data, language=language, backend=backend,
+                                          api_key=api_key, whisper_model=whisper_model,
+                                          gemini_model=gemini_model, sanitize_fillers=sanitize_fillers)
+                        self.signals.transcription_ready.emit(text)
+                    except Exception as e:
+                        self.signals.error.emit(str(e))
 
             t = threading.Thread(target=worker, daemon=True)
             t.start()
@@ -529,6 +585,10 @@ class App:
         clipboard.setText(text)
 
         if self.config["output_mode"] == "paste":
+            if self._code_mode and self._code_selection.strip():
+                log.debug("Снятие выделения (без удаления) и переход на новую строку перед вставкой кода")
+                subprocess.run(["xdotool", "key", "--clearmodifiers", "Right"])
+                subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"])
             log.debug("Вставка через xdotool")
             subprocess.Popen(["xdotool", "key", "--clearmodifiers", "ctrl+v"])
 
@@ -608,13 +668,14 @@ class App:
         if dialog.exec_() == QDialog.Accepted:
             new_config = dialog.get_config()
             old_hotkey = self.config["hotkey"]
+            old_code_hotkey = self.config.get("code_hotkey", "<ctrl>+<alt>+c")
             old_device = self.config.get("audio_device")
             old_backend = self.config.get("backend", "whisper")
             self.config = new_config
             save_config(new_config)
             if old_backend == "whisper" and new_config.get("backend") != "whisper":
                 unload_whisper_model()
-            if new_config["hotkey"] != old_hotkey:
+            if new_config["hotkey"] != old_hotkey or new_config.get("code_hotkey") != old_code_hotkey:
                 self._stop_hotkey_listener()
                 self._start_hotkey_listener()
             if new_config.get("audio_device") != old_device:
