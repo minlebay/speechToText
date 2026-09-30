@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -25,6 +26,8 @@ from PyQt5.QtWidgets import (
 
 from voice2text import __version__
 from voice2text.config import get_api_key, load_config, save_config, setup_logging
+from voice2text.desktop import KeySender, get_selected_text, is_wayland, set_clipboard
+from voice2text.hotkeys import KGlobalAccelHotkeys, hotkey_to_qt
 from voice2text.icons import make_tray_icon
 from voice2text.overlay import OverlayWindow, compute_level
 
@@ -67,22 +70,6 @@ def _list_pulse_sources():
         pass
     return []
 from voice2text.transcriber import transcribe, transcribe_gemini_code, unload_whisper_model
-
-
-def _get_selected_text():
-    """Читает текущее X11 PRIMARY-выделение (обновляется автоматически при
-    выделении текста мышью/клавиатурой, без имитации Ctrl+C — синтетический
-    Ctrl+C небезопасен, например в терминале это SIGINT, а не копирование)."""
-    try:
-        r = subprocess.run(
-            ["xclip", "-o", "-selection", "primary"],
-            capture_output=True, text=True, timeout=1,
-        )
-        if r.returncode == 0:
-            return r.stdout
-    except Exception:
-        pass
-    return ""
 
 
 def _is_source_muted(source_name=None):
@@ -377,6 +364,14 @@ class App:
         self._code_mode = False
         self._code_selection = ""
         self.device_monitor = DeviceMonitor(device=self.config.get("audio_device"))
+        self.keys = KeySender()
+        self._kglobalaccel = None
+        if is_wayland():
+            if KGlobalAccelHotkeys.is_available():
+                self._kglobalaccel = KGlobalAccelHotkeys()
+                self._kglobalaccel.activated.connect(self._on_global_shortcut)
+            else:
+                log.warning("Wayland без KGlobalAccel: хоткеи pynput сработают только в X11-окнах")
         self.tray = QSystemTrayIcon(self._tray_icon("idle"))
         self.tray.setToolTip("Voice2Text — Готов")
         self.qt_app.paletteChanged.connect(self._on_palette_changed)
@@ -414,6 +409,9 @@ class App:
         self.device_monitor.start()
 
         self._start_hotkey_listener()
+        self.qt_app.aboutToQuit.connect(self._stop_hotkey_listener)
+        if self.keys.error:
+            self.tray.showMessage("Voice2Text", self.keys.error, QSystemTrayIcon.Warning, 5000)
 
     def _tray_icon(self, state):
         variant = self.config.get("tray_icon_mono_variant", "auto")
@@ -445,31 +443,52 @@ class App:
         self.tray.setToolTip(self.tray.toolTip().split(" (микрофон")[0] + tooltip_suffix)
 
     def _validate_hotkey(self, hotkey, default, config_key):
-        from pynput.keyboard import GlobalHotKeys
+        if self._kglobalaccel is not None:
+            error = None if hotkey_to_qt(hotkey) is not None else "не разбирается как сочетание Qt"
+        else:
+            from pynput.keyboard import GlobalHotKeys
 
-        try:
-            GlobalHotKeys({hotkey: lambda: None})
+            try:
+                GlobalHotKeys({hotkey: lambda: None})
+                error = None
+            except (ValueError, KeyError) as e:
+                error = e
+        if error is None:
             return hotkey
-        except (ValueError, KeyError) as e:
-            log.error("Неверная горячая клавиша '%s': %s, откат на %s", hotkey, e, default)
-            self.tray.showMessage(
-                "Voice2Text",
-                f"Неверная горячая клавиша \"{hotkey}\", используется {default}",
-                QSystemTrayIcon.Warning,
-                5000,
-            )
-            self.config[config_key] = default
-            save_config(self.config)
-            return default
+        log.error("Неверная горячая клавиша '%s': %s, откат на %s", hotkey, error, default)
+        self.tray.showMessage(
+            "Voice2Text",
+            f"Неверная горячая клавиша \"{hotkey}\", используется {default}",
+            QSystemTrayIcon.Warning,
+            5000,
+        )
+        self.config[config_key] = default
+        save_config(self.config)
+        return default
 
     def _start_hotkey_listener(self):
-        from pynput.keyboard import GlobalHotKeys
-
         hotkey = self._validate_hotkey(self.config["hotkey"], "<ctrl>+<alt>+h", "hotkey")
         code_hotkey = self._validate_hotkey(
             self.config.get("code_hotkey", "<ctrl>+<alt>+c"), "<ctrl>+<alt>+c", "code_hotkey"
         )
         log.info("Регистрация горячих клавиш: %s (запись), %s (код)", hotkey, code_hotkey)
+        if self._kglobalaccel is not None:
+            for action, key, label in (
+                ("toggle_recording", hotkey, "Начать/остановить запись"),
+                ("toggle_code_recording", code_hotkey, "Запись в режиме кода"),
+            ):
+                if not self._kglobalaccel.register(action, label, hotkey_to_qt(key)):
+                    log.error("KDE не принял сочетание %s для %s", key, action)
+                    self.tray.showMessage(
+                        "Voice2Text",
+                        f"Сочетание \"{key}\" занято другим приложением KDE — выберите другое в настройках",
+                        QSystemTrayIcon.Warning,
+                        5000,
+                    )
+            return
+
+        from pynput.keyboard import GlobalHotKeys
+
         self._hotkey_listener = GlobalHotKeys({
             hotkey: lambda: self.signals.toggle_recording.emit(),
             code_hotkey: lambda: self.signals.toggle_code_recording.emit(),
@@ -478,8 +497,16 @@ class App:
         self._hotkey_listener.start()
 
     def _stop_hotkey_listener(self):
-        if hasattr(self, "_hotkey_listener"):
+        if self._kglobalaccel is not None:
+            self._kglobalaccel.release()
+        elif hasattr(self, "_hotkey_listener"):
             self._hotkey_listener.stop()
+
+    def _on_global_shortcut(self, action):
+        if action == "toggle_recording":
+            self.signals.toggle_recording.emit()
+        elif action == "toggle_code_recording":
+            self.signals.toggle_code_recording.emit()
 
     def _on_toggle(self, code_mode=False):
         log.debug("Хоткей нажат, текущее состояние: %s, code_mode=%s", self.state, code_mode)
@@ -523,7 +550,7 @@ class App:
                 return
             self.state = "recording"
             self._code_mode = code_mode
-            self._code_selection = _get_selected_text() if code_mode else ""
+            self._code_selection = get_selected_text() if code_mode else ""
             self.tray.setIcon(self._tray_icon("recording"))
             status = "Запись кода..." if code_mode else "Запись..."
             self.tray.setToolTip(f"Voice2Text — {status}")
@@ -581,16 +608,15 @@ class App:
 
     def _on_transcription(self, text):
         log.info("Транскрипция получена: %d символов", len(text))
-        clipboard = QApplication.clipboard()
-        clipboard.setText(text)
+        set_clipboard(text)
 
         if self.config["output_mode"] == "paste":
             if self._code_mode and self._code_selection.strip():
                 log.debug("Снятие выделения (без удаления) и переход на новую строку перед вставкой кода")
-                subprocess.run(["xdotool", "key", "--clearmodifiers", "Right"])
-                subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"])
-            log.debug("Вставка через xdotool")
-            subprocess.Popen(["xdotool", "key", "--clearmodifiers", "ctrl+v"])
+                self.keys.send("Right")
+                self.keys.send("Return")
+            log.debug("Вставка через Ctrl+V")
+            self.keys.send("ctrl+v")
 
         preview = text[:50] + ("..." if len(text) > 50 else "")
         self.tray.showMessage("Voice2Text", preview, QSystemTrayIcon.Information, 3000)
@@ -697,6 +723,15 @@ def main():
 
     setup_logging()
     log.info("Запуск Voice2Text")
+
+    if is_wayland():
+        # Окна приложения — X11-клиенты через XWayland: у Wayland-окна Qt5
+        # нельзя задать позицию, «поверх всех» и отказ от фокуса, а без них
+        # оверлей встаёт куда решит KWin и может увести фокус из окна, куда
+        # затем вставляется текст. Нативный блюр KWin тоже работает только
+        # через X11-свойство окна (см. overlay.set_kwin_blur_region).
+        os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+        log.info("Wayland-сессия: Qt через %s", os.environ["QT_QPA_PLATFORM"])
 
     app = QApplication(["voice2text"])
 

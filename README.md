@@ -20,13 +20,30 @@
 
 ## Требования
 
-- Linux (X11, KDE/GNOME)
+- Linux: X11 (KDE/GNOME) или Wayland (KDE Plasma)
 - Python 3.10+
 - Системные пакеты:
 
 ```bash
-sudo apt install xdotool portaudio19-dev python3-venv
+sudo apt install xdotool xclip wl-clipboard portaudio19-dev python3-venv
 ```
+
+### Wayland
+
+Под Wayland xdotool/xclip и перехват клавиш через pynput видят только X11-окна,
+поэтому приложение переключается на другие механизмы:
+
+- **Горячие клавиши** регистрируются в KDE (KGlobalAccel) и работают в любом окне.
+  Они появятся в «Параметры системы → Комбинации клавиш» как Voice2Text, но задавать
+  их нужно в настройках самого приложения — при запуске оно перезаписывает значения KDE.
+  В других Wayland-окружениях без KGlobalAccel остаётся pynput, и хоткеи срабатывают
+  только в X11-приложениях.
+- **Вставка** — Ctrl+V через виртуальную клавиатуру `/dev/uinput`. Пакет ставит
+  udev-правило `70-voice2text-uinput.rules`, открывающее uinput пользователю активной
+  сессии (такое же ставит `steam-devices`).
+- **Буфер обмена и выделение** — через `wl-copy` / `wl-paste`.
+- Окна приложения (оверлей, настройки) работают через XWayland: только так оверлей
+  можно поставить в нужное место поверх окон, не забирая фокус, и получить блюр KWin.
 
 ## Установка
 
@@ -42,6 +59,7 @@ sudo apt install ./deb/voice2text_<версия>_amd64.deb
 - Установит все Python-зависимости
 - Создаст команду `voice2text` в `/usr/local/bin/`
 - Создаст `.desktop` файл для меню приложений
+- Поставит udev-правило для `/dev/uinput`, без которого не работает вставка под Wayland
 
 ## Запуск
 
@@ -141,6 +159,15 @@ sudo apt remove voice2text
 
 Конфиг в `~/.config/voice2text/` сохраняется.
 
+## После обновления системы
+
+venv привязан к версии системного Python. Если она сменилась (например, при обновлении
+Ubuntu), `voice2text` не запустится и покажет уведомление — пересоберите окружение:
+
+```bash
+sudo dpkg-reconfigure voice2text
+```
+
 ## Структура проекта
 
 ```text
@@ -149,6 +176,8 @@ voice2text/
   __main__.py       # Точка входа
   app.py            # UI, системный трей, горячие клавиши, настройки
   config.py         # Загрузка/сохранение конфига, логирование
+  desktop.py        # Буфер обмена, выделение, эмуляция клавиш (X11/Wayland)
+  hotkeys.py        # Глобальные горячие клавиши через KDE KGlobalAccel (Wayland)
   recorder.py       # Запись аудио через parecord (PulseAudio/PipeWire)
   transcriber.py    # Транскрипция (whisper/gemini/google_stt)
   icons.py          # Иконки трея (idle/recording/transcribing)
