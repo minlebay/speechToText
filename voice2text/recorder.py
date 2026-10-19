@@ -96,6 +96,17 @@ class Recorder:
         except OSError:
             return b""
 
+    def read_pcm(self, offset=0):
+        """Возвращает сырые PCM-данные записи начиная с offset (без WAV-заголовка)."""
+        if self._temp_file is None:
+            return b""
+        try:
+            with open(self._temp_file.name, "rb") as f:
+                f.seek(44 + offset)
+                return f.read()
+        except OSError:
+            return b""
+
     def read_partial_wav(self):
         """Возвращает корректный WAV со всем, что уже записано, без остановки записи."""
         if self._temp_file is None:

@@ -16,6 +16,8 @@ DEFAULTS = {
     "backend": "whisper",
     "whisper_model": "base",
     "gemini_model": "gemini-3.8-flash",
+    "deepgram_model": "flux-general-multi",
+    "deepgram_multilingual": True,
     "audio_device": None,
     "sanitize_fillers": False,
     "show_overlay": False,
@@ -68,4 +70,11 @@ def get_api_key():
     key = os.environ.get("GEMINI_API_KEY_TTS", "")
     if not key:
         log.warning("GEMINI_API_KEY_TTS не установлен")
+    return key
+
+
+def get_deepgram_api_key():
+    key = os.environ.get("DEEPGRAM_VOICETOTEXT_KEY", "")
+    if not key:
+        log.warning("DEEPGRAM_VOICETOTEXT_KEY не установлен")
     return key

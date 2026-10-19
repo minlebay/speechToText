@@ -25,14 +25,14 @@ from PyQt5.QtWidgets import (
 )
 
 from voice2text import __version__
-from voice2text.config import get_api_key, load_config, save_config, setup_logging
+from voice2text.config import get_api_key, get_deepgram_api_key, load_config, save_config, setup_logging
 from voice2text.desktop import KeySender, get_selected_text, is_wayland, set_clipboard
 from voice2text.hotkeys import KGlobalAccelHotkeys, hotkey_to_qt
 from voice2text.icons import make_tray_icon
 from voice2text.overlay import OverlayWindow, compute_level
 
 log = logging.getLogger(__name__)
-from voice2text.recorder import Recorder
+from voice2text.recorder import SAMPLE_RATE, Recorder
 
 
 def _list_pulse_sources():
@@ -69,6 +69,7 @@ def _list_pulse_sources():
     except Exception:
         pass
     return []
+from voice2text.deepgram_stream import DeepgramStream, is_flux
 from voice2text.transcriber import transcribe, transcribe_gemini_code, unload_whisper_model
 
 
@@ -114,6 +115,17 @@ _TRAY_MONO_VARIANTS = [
     ("light", "Светлая (для тёмных панелей)"),
     ("dark", "Тёмная (для светлых панелей)"),
 ]
+
+
+FINAL_TEXT_HOLD_MS = 800  # сколько показывать итоговый текст в оверлее после вставки
+
+
+def _backend_api_key(backend):
+    if backend == "gemini":
+        return get_api_key()
+    if backend == "deepgram":
+        return get_deepgram_api_key()
+    return ""
 
 
 class SignalBridge(QObject):
@@ -199,7 +211,7 @@ class SettingsDialog(QDialog):
         form.addRow("Язык:", self.language_edit)
 
         self.backend_combo = QComboBox()
-        self.backend_combo.addItems(["whisper", "gemini", "google_stt"])
+        self.backend_combo.addItems(["whisper", "gemini", "google_stt", "deepgram"])
         self.backend_combo.setCurrentText(config.get("backend", "whisper"))
         form.addRow("Движок:", self.backend_combo)
 
@@ -221,6 +233,24 @@ class SettingsDialog(QDialog):
         ])
         self.gemini_model_combo.setCurrentText(config.get("gemini_model", "gemini-3.8-flash"))
         form.addRow("Gemini модель:", self.gemini_model_combo)
+
+        self.deepgram_model_combo = QComboBox()
+        self.deepgram_model_combo.addItems([
+            "flux-general-multi",
+            "nova-3",
+        ])
+        self.deepgram_model_combo.setToolTip(
+            "flux-general-multi — потоковое распознавание во время записи, итог сразу после остановки.\n"
+            "nova-3 — запись целиком отправляется после остановки."
+        )
+        self.deepgram_model_combo.setCurrentText(config.get("deepgram_model", "flux-general-multi"))
+        form.addRow("Deepgram модель:", self.deepgram_model_combo)
+
+        self.deepgram_multi_checkbox = QCheckBox(
+            "Deepgram: мультиязычный режим — смешанная речь, например ru + en (flux и nova-3)"
+        )
+        self.deepgram_multi_checkbox.setChecked(config.get("deepgram_multilingual", True))
+        form.addRow(self.deepgram_multi_checkbox)
 
         self.sanitize_checkbox = QCheckBox("Очищать текст от слов-паразитов (доступно только с движком Gemini)")
         self.sanitize_checkbox.setChecked(config.get("sanitize_fillers", False))
@@ -339,6 +369,8 @@ class SettingsDialog(QDialog):
             "backend": self.backend_combo.currentText(),
             "whisper_model": self.whisper_model_combo.currentText(),
             "gemini_model": self.gemini_model_combo.currentText(),
+            "deepgram_model": self.deepgram_model_combo.currentText(),
+            "deepgram_multilingual": self.deepgram_multi_checkbox.isChecked(),
             "audio_device": self.device_combo.currentData(),
             "sanitize_fillers": self.sanitize_checkbox.isChecked(),
             "show_overlay": self.overlay_checkbox.isChecked(),
@@ -383,6 +415,7 @@ class App:
         self.overlay.set_glass_opacity(self.config.get("overlay_glass_opacity", 30))
         self._partial_in_progress = False
         self._record_start_time = None
+        self._dg_stream = None
         self._level_timer = QTimer()
         self._level_timer.setInterval(80)
         self._level_timer.timeout.connect(self._update_level)
@@ -532,6 +565,15 @@ class App:
                             3000,
                         )
                         return
+                elif backend == "deepgram":
+                    if not get_deepgram_api_key():
+                        self.tray.showMessage(
+                            "Voice2Text",
+                            "API ключ не установлен. Задайте переменную окружения DEEPGRAM_VOICETOTEXT_KEY.",
+                            QSystemTrayIcon.Warning,
+                            3000,
+                        )
+                        return
                 elif backend == "google_stt":
                     import os
                     if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
@@ -557,16 +599,22 @@ class App:
             self.tray.showMessage("Voice2Text", status, QSystemTrayIcon.Information, 1500)
 
             self._record_start_time = time.time()
+            realtime = self.config.get("show_overlay") and self.config.get("realtime_transcription", False)
+            deepgram = not code_mode and self.config.get("backend") == "deepgram"
+            # Flux стримит всегда (итог готов сразу после остановки), Nova — только ради живого текста
+            if deepgram and (realtime or is_flux(self.config.get("deepgram_model", "flux-general-multi"))):
+                self._start_deepgram_stream()
             if self.config.get("show_overlay"):
                 self.overlay.set_text_enabled(self.config.get("realtime_transcription", False))
                 self.overlay.show_recording()
                 self._level_timer.start()
-                if self.config.get("realtime_transcription", False):
+                if realtime and not deepgram:
                     self._live_timer.start()
         elif self.state == "recording":
             self._level_timer.stop()
             self._live_timer.stop()
             audio_data = self.recorder.stop()
+            dg_stream, self._dg_stream = self._dg_stream, None
             self.state = "transcribing"
             self.tray.setIcon(self._tray_icon("transcribing"))
             self.tray.setToolTip("Voice2Text — Обработка...")
@@ -589,16 +637,26 @@ class App:
             else:
                 language = self.config["language"]
                 backend = self.config.get("backend", "whisper")
-                api_key = get_api_key() if backend == "gemini" else ""
+                api_key = _backend_api_key(backend)
                 whisper_model = self.config.get("whisper_model", "base")
                 gemini_model = self.config.get("gemini_model", "gemini-3.8-flash")
+                deepgram_model = self.config.get("deepgram_model", "flux-general-multi")
+                deepgram_multilingual = self.config.get("deepgram_multilingual", True)
                 sanitize_fillers = backend == "gemini" and self.config.get("sanitize_fillers", False)
 
                 def worker():
                     try:
+                        if dg_stream is not None:
+                            text = dg_stream.finish(audio_data[44:])
+                            if text is not None:
+                                self.signals.transcription_ready.emit(text)
+                                return
+                            log.warning("Deepgram стрим не удался, повтор обычным запросом")
                         text = transcribe(audio_data, language=language, backend=backend,
                                           api_key=api_key, whisper_model=whisper_model,
-                                          gemini_model=gemini_model, sanitize_fillers=sanitize_fillers)
+                                          gemini_model=gemini_model, sanitize_fillers=sanitize_fillers,
+                                          deepgram_model=deepgram_model,
+                                          deepgram_multilingual=deepgram_multilingual)
                         self.signals.transcription_ready.emit(text)
                     except Exception as e:
                         self.signals.error.emit(str(e))
@@ -623,7 +681,17 @@ class App:
         self.state = "idle"
         self.tray.setIcon(self._tray_icon("idle"))
         self.tray.setToolTip("Voice2Text — Готов")
-        self.overlay.hide_overlay()
+        if self.overlay.has_text():
+            # Последние слова стрим присылает уже после остановки — показываем
+            # итог целиком и даём его увидеть, прежде чем спрятать оверлей.
+            self.overlay.set_partial_text(text)
+            QTimer.singleShot(FINAL_TEXT_HOLD_MS, self._hide_overlay_if_idle)
+        else:
+            self.overlay.hide_overlay()
+
+    def _hide_overlay_if_idle(self):
+        if self.state == "idle":
+            self.overlay.hide_overlay()
 
     def _on_error(self, msg):
         log.error("Ошибка: %s", msg)
@@ -633,6 +701,9 @@ class App:
         self.tray.setToolTip("Voice2Text — Готов")
         self._level_timer.stop()
         self._live_timer.stop()
+        if self._dg_stream is not None:
+            self._dg_stream.cancel()
+            self._dg_stream = None
         self.overlay.hide_overlay()
 
     def _update_level(self):
@@ -640,6 +711,19 @@ class App:
         self.overlay.set_level(compute_level(pcm))
         if self._record_start_time is not None:
             self.overlay.set_elapsed(time.time() - self._record_start_time)
+
+    def _start_deepgram_stream(self):
+        self._dg_stream = DeepgramStream(
+            api_key=get_deepgram_api_key(),
+            read_pcm=self.recorder.read_pcm,
+            on_text=self.signals.partial_transcription_ready.emit,
+            model=self.config.get("deepgram_model", "flux-general-multi"),
+            language=self.config["language"],
+            multilingual=self.config.get("deepgram_multilingual", True),
+            sample_rate=SAMPLE_RATE,
+            channels=self.recorder.channels,
+        )
+        self._dg_stream.start()
 
     def _trigger_partial_transcription(self):
         if self._partial_in_progress or self.state != "recording":
@@ -651,15 +735,19 @@ class App:
 
         language = self.config["language"]
         backend = self.config.get("backend", "whisper")
-        api_key = get_api_key() if backend == "gemini" else ""
+        api_key = _backend_api_key(backend)
         whisper_model = self.config.get("whisper_model", "base")
         gemini_model = self.config.get("gemini_model", "gemini-3.8-flash")
+        deepgram_model = self.config.get("deepgram_model", "flux-general-multi")
+        deepgram_multilingual = self.config.get("deepgram_multilingual", True)
 
         def worker():
             try:
                 text = transcribe(wav_bytes, language=language, backend=backend,
                                   api_key=api_key, whisper_model=whisper_model,
-                                  gemini_model=gemini_model, sanitize_fillers=False)
+                                  gemini_model=gemini_model, sanitize_fillers=False,
+                                  deepgram_model=deepgram_model,
+                                  deepgram_multilingual=deepgram_multilingual)
                 self.signals.partial_transcription_ready.emit(text)
             except Exception as e:
                 log.debug("Частичная транскрипция не удалась: %s", e)
@@ -669,7 +757,7 @@ class App:
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_partial_transcription(self, text):
-        if self.state == "recording":
+        if self.state in ("recording", "transcribing"):
             self.overlay.set_partial_text(text)
 
     def _on_device_connected(self, name):

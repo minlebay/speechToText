@@ -218,11 +218,60 @@ def transcribe_google_stt(audio_wav, language="ru"):
         raise RuntimeError(f"Ошибка транскрипции: {e}") from e
 
 
+def transcribe_deepgram(audio_wav, api_key, language="ru", model="nova-3", multilingual=True):
+    try:
+        # Flux работает только в стриминге — для обычного запроса берём Nova-3
+        if model.startswith("flux"):
+            model = "nova-3"
+        import json
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        # Code-switching (language=multi) с русским поддерживает только Nova-3
+        if multilingual and model.startswith("nova-3"):
+            language = "multi"
+        log.info("Deepgram транскрипция (%d байт, язык=%s, модель=%s)", len(audio_wav), language, model)
+
+        params = urllib.parse.urlencode({
+            "model": model,
+            "language": language,
+            "smart_format": "true",
+            "punctuate": "true",
+        })
+        req = urllib.request.Request(
+            f"https://api.deepgram.com/v1/listen?{params}",
+            data=audio_wav,
+            headers={"Authorization": f"Token {api_key}", "Content-Type": "audio/wav"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.load(resp)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")[:300]
+            raise RuntimeError(f"HTTP {e.code}: {detail}") from e
+
+        channels = data.get("results", {}).get("channels", [])
+        result = ""
+        if channels and channels[0].get("alternatives"):
+            result = channels[0]["alternatives"][0].get("transcript", "").strip()
+
+        log.info("Транскрипция получена: %d символов", len(result))
+        return result
+    except Exception as e:
+        log.error("Ошибка Deepgram транскрипции: %s", e)
+        raise RuntimeError(f"Ошибка транскрипции: {e}") from e
+
+
 def transcribe(audio_wav, language="ru", backend="whisper", api_key="", whisper_model="base",
-               gemini_model="gemini-3.8-flash", sanitize_fillers=False):
+               gemini_model="gemini-3.8-flash", sanitize_fillers=False, deepgram_model="flux-general-multi",
+               deepgram_multilingual=True):
     if backend == "whisper":
         return transcribe_whisper(audio_wav, language, whisper_model)
     elif backend == "google_stt":
         return transcribe_google_stt(audio_wav, language)
+    elif backend == "deepgram":
+        return transcribe_deepgram(audio_wav, api_key, language, deepgram_model, deepgram_multilingual)
     else:
         return transcribe_gemini(audio_wav, api_key, language, gemini_model, sanitize_fillers)

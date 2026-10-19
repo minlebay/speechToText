@@ -47,6 +47,16 @@ def _stadium_region_rects(x, y, w, h):
     return [(r.x(), r.y(), r.width(), r.height()) for r in region.rects()]
 
 
+def _rounded_region_rects(x, y, w, h, radius):
+    """То же для прямоугольника со скруглёнными углами (блок живого текста)."""
+    d = 2 * radius
+    region = QRegion(QRect(int(x + radius), int(y), int(max(0, w - d)), int(h)))
+    region += QRegion(QRect(int(x), int(y + radius), int(w), int(max(0, h - d))))
+    for cx, cy in ((x, y), (x + w - d, y), (x, y + h - d), (x + w - d, y + h - d)):
+        region += QRegion(QRect(int(cx), int(cy), int(d), int(d)), QRegion.Ellipse)
+    return [(r.x(), r.y(), r.width(), r.height()) for r in region.rects()]
+
+
 def set_kwin_blur_region(win_id: int, rects):
     """Просит компоузитор (KWin на Plasma) реально размывать рабочий стол
     под окном в наборе прямоугольников rects=[(x, y, w, h), ...] в локальных
@@ -642,7 +652,8 @@ class OverlayWindow(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
-        layout.setAlignment(Qt.AlignHCenter)
+        layout.setSizeConstraint(QVBoxLayout.SetFixedSize)
+        self._layout = layout
 
         self._circle = PulseIndicator(self)
         self._capsule = CapsuleIndicator(self)
@@ -656,7 +667,6 @@ class OverlayWindow(QWidget):
         self.text_label = QLabel(self)
         self.text_label.setWordWrap(True)
         self.text_label.setAlignment(Qt.AlignCenter)
-        self.text_label.setMaximumWidth(360)
         self.text_label.hide()
         layout.addWidget(self.text_label, 0, Qt.AlignHCenter)
 
@@ -665,6 +675,7 @@ class OverlayWindow(QWidget):
         self._theme = "dark"
         self._shape = "circle"
         self._apply_label_style()
+        self._arrange()
 
     @property
     def indicator(self):
@@ -676,6 +687,19 @@ class OverlayWindow(QWidget):
 
     def set_position(self, position):
         self._position = position if position in POSITIONS else "center"
+        self._arrange()
+
+    def _arrange(self):
+        """Текст растёт от капсулы наружу: под ней, а при нижних позициях —
+        над ней, чтобы не уходить за край экрана. По горизонтали он прижат
+        к той же стороне, что и капсула (по центру — центрирован)."""
+        fx, fy = POSITIONS[self._position]
+        layout = self._layout
+        layout.removeWidget(self.text_label)
+        layout.insertWidget(0 if fy == 1.0 else layout.count(), self.text_label)
+        align = {0.0: Qt.AlignLeft, 1.0: Qt.AlignRight}.get(fx, Qt.AlignHCenter)
+        for widget in (self._circle, self._capsule, self._capsule_glass, self.text_label):
+            layout.setAlignment(widget, align)
 
     def set_theme(self, theme):
         self._theme = theme if theme in _THEMES else "dark"
@@ -691,33 +715,42 @@ class OverlayWindow(QWidget):
         self._capsule_glass.setVisible(self._shape == "capsule_glass")
         if self._shape != "capsule_glass":
             self._clear_blur_region()
+        self._apply_label_style()
 
     def set_glass_opacity(self, percent):
         self._capsule_glass.set_opacity(percent)
+        self._apply_label_style()
+
+    LABEL_RADIUS = 16
+    LABEL_MAX_WIDTH = 360
 
     def _apply_label_style(self):
-        if self._theme == "light":
-            style = (
-                "QLabel {"
-                "  color: #202024;"
-                "  background-color: rgba(255, 255, 255, 235);"
-                "  border: 2px solid rgba(220, 38, 38, 220);"
-                "  border-radius: 10px;"
-                "  padding: 10px 16px;"
-                "  font-size: 14px;"
-                "}"
-            )
+        # Та же палитра, что у капсулы: её подложка и нейтральный тон текста
+        # (чуть ярче, чем у таймера, чтобы распознанный текст легко читался).
+        colors = _capsule_colors(self._theme)
+        base = colors["text"]
+        target = 255 if self._theme == "dark" else 0
+        text = QColor(*(int(c + (target - c) * 0.55) for c in (base.red(), base.green(), base.blue())))
+        if self._shape == "capsule_glass":
+            # Как у стеклянной капсулы: лёгкая тонировка поверх блюра KWin
+            # (регион блюра выставляет _update_blur_region) и светлый ободок.
+            bg = QColor(_GLASS_TINT.get(self._theme, _GLASS_TINT["dark"]))
+            bg.setAlpha(round(self._capsule_glass._opacity_percent / 100 * 255))
+            border = "1px solid rgba(255, 255, 255, 70)"
         else:
-            style = (
-                "QLabel {"
-                "  color: #e8e8f0;"
-                "  background-color: rgba(20, 20, 30, 235);"
-                "  border: 2px solid rgba(255, 60, 60, 200);"
-                "  border-radius: 10px;"
-                "  padding: 10px 16px;"
-                "  font-size: 14px;"
-                "}"
-            )
+            bg = QColor(colors["bg"])
+            bg.setAlpha(240)
+            border = "none"
+        style = (
+            "QLabel {"
+            f"  color: {text.name()};"
+            f"  background-color: rgba({bg.red()}, {bg.green()}, {bg.blue()}, {bg.alpha()});"
+            f"  border: {border};"
+            f"  border-radius: {self.LABEL_RADIUS}px;"
+            "  padding: 10px 18px;"
+            "  font-size: 14px;"
+            "}"
+        )
         self.text_label.setStyleSheet(style)
 
     def set_text_enabled(self, enabled):
@@ -731,9 +764,8 @@ class OverlayWindow(QWidget):
         self.indicator.set_level(0.0)
         if hasattr(self.indicator, "set_elapsed"):
             self.indicator.set_elapsed(0)
-        if self._show_text:
-            self.text_label.setText("")
-            self.text_label.show()
+        self.text_label.setText("")
+        self.text_label.hide()
         self._recenter_and_show()
 
     def _update_blur_region(self):
@@ -744,6 +776,9 @@ class OverlayWindow(QWidget):
         x = self._capsule_glass.x() + margin
         y = self._capsule_glass.y() + margin
         rects = _stadium_region_rects(x, y, self._capsule_glass.WIDTH, self._capsule_glass.HEIGHT)
+        if self.text_label.isVisible():
+            g = self.text_label.geometry()
+            rects += _rounded_region_rects(g.x(), g.y(), g.width(), g.height(), self.LABEL_RADIUS)
         set_kwin_blur_region(win_id, rects)
 
     def _clear_blur_region(self):
@@ -765,7 +800,28 @@ class OverlayWindow(QWidget):
     def set_partial_text(self, text):
         if self._show_text:
             self.text_label.setText(text)
+            self.text_label.setVisible(bool(text))
+            self._fit_label()
             self._recenter_and_show()
+
+    def has_text(self):
+        return self._show_text and self.text_label.isVisible()
+
+    def _fit_label(self):
+        """Явно подгоняет размер блока под текст. Иначе при пословном
+        наращивании QLabel с переносом строк остаётся узким по прежнему
+        размеру и получает высоту меньше нужной — последняя строка (самые
+        свежие слова) обрезается."""
+        label = self.text_label
+        if not label.text():
+            return
+        label.setMinimumSize(0, 0)
+        label.setMaximumSize(16777215, 16777215)
+        label.setWordWrap(False)
+        natural = label.sizeHint().width()
+        label.setWordWrap(True)
+        width = min(natural, self.LABEL_MAX_WIDTH)
+        label.setFixedSize(width, label.heightForWidth(width))
 
     def hide_overlay(self):
         self._clear_blur_region()
@@ -773,16 +829,25 @@ class OverlayWindow(QWidget):
         self.text_label.setText("")
 
     def _compute_position(self):
+        """Точка привязки считается по размеру одной капсулы, а не всего окна:
+        так капсула стоит на месте, а блок текста растёт от неё вниз/вверх."""
         screen = QApplication.primaryScreen()
         if screen is None:
             return None
         geo = screen.availableGeometry()
         margin = 24
         fx, fy = POSITIONS.get(self._position, POSITIONS["center"])
-        avail_w = max(0, geo.width() - self.width() - 2 * margin)
-        avail_h = max(0, geo.height() - self.height() - 2 * margin)
-        x = geo.x() + margin + int(fx * avail_w)
-        y = geo.y() + margin + int(fy * avail_h)
+        ind = self.indicator.size()
+        anchor_x = geo.x() + margin + int(fx * max(0, geo.width() - ind.width() - 2 * margin))
+        anchor_y = geo.y() + margin + int(fy * max(0, geo.height() - ind.height() - 2 * margin))
+        # anchor — левый верхний угол капсулы; переводим его в угол окна
+        if fx == 0.0:
+            x = anchor_x
+        elif fx == 1.0:
+            x = anchor_x + ind.width() - self.width()
+        else:
+            x = anchor_x + ind.width() // 2 - self.width() // 2
+        y = anchor_y + ind.height() - self.height() if fy == 1.0 else anchor_y
         return x, y
 
     def _recenter_and_show(self):
