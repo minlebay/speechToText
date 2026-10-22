@@ -4,7 +4,8 @@ import random
 
 import numpy as np
 from PyQt5.QtCore import QPointF, QRect, QRectF, Qt, QTimer
-from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QRadialGradient, QRegion
+from PyQt5.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage
+from PyQt5.QtGui import QBrush, QColor, QCursor, QFont, QPainter, QPainterPath, QPen, QRadialGradient, QRegion
 from PyQt5.QtWidgets import QApplication, QGraphicsDropShadowEffect, QLabel, QVBoxLayout, QWidget
 
 log = logging.getLogger(__name__)
@@ -55,6 +56,32 @@ def _rounded_region_rects(x, y, w, h, radius):
     for cx, cy in ((x, y), (x + w - d, y), (x, y + h - d), (x + w - d, y + h - d)):
         region += QRegion(QRect(int(cx), int(cy), int(d), int(d)), QRegion.Ellipse)
     return [(r.x(), r.y(), r.width(), r.height()) for r in region.rects()]
+
+
+def _kwin_active_output_name():
+    """Имя монитора, который KWin считает текущим, — там активное окно
+    (или курсор, если включено «активный экран следует за мышью»). Через
+    XWayland Qt этого не узнать: QCursor.pos() обновляется, лишь пока мышь
+    над X11-окнами, а фокус нативных Wayland-окон X-клиентам не виден."""
+    iface = QDBusInterface("org.kde.KWin", "/KWin", "org.kde.KWin", QDBusConnection.sessionBus())
+    if not iface.isValid():
+        return None
+    iface.setTimeout(200)
+    reply = iface.call("activeOutputName")
+    if reply.type() != QDBusMessage.ReplyMessage or not reply.arguments():
+        return None
+    return reply.arguments()[0] or None
+
+
+def target_screen():
+    """Экран, на котором показывать оверлей: текущий монитор KWin, иначе
+    тот, где курсор, иначе основной."""
+    name = _kwin_active_output_name()
+    if name:
+        for screen in QApplication.screens():
+            if screen.name() == name:
+                return screen
+    return QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
 
 
 def set_kwin_blur_region(win_id: int, rects):
@@ -671,6 +698,7 @@ class OverlayWindow(QWidget):
         layout.addWidget(self.text_label, 0, Qt.AlignHCenter)
 
         self._show_text = False
+        self._screen = None
         self._position = "center"
         self._theme = "dark"
         self._shape = "circle"
@@ -766,6 +794,9 @@ class OverlayWindow(QWidget):
             self.indicator.set_elapsed(0)
         self.text_label.setText("")
         self.text_label.hide()
+        # Экран выбирается в начале записи и держится до скрытия оверлея:
+        # он не перепрыгивает между мониторами посреди диктовки.
+        self._screen = target_screen()
         self._recenter_and_show()
 
     def _update_blur_region(self):
@@ -827,11 +858,14 @@ class OverlayWindow(QWidget):
         self._clear_blur_region()
         self.hide()
         self.text_label.setText("")
+        self._screen = None
 
     def _compute_position(self):
         """Точка привязки считается по размеру одной капсулы, а не всего окна:
         так капсула стоит на месте, а блок текста растёт от неё вниз/вверх."""
-        screen = QApplication.primaryScreen()
+        if self._screen not in QApplication.screens():
+            self._screen = target_screen()
+        screen = self._screen
         if screen is None:
             return None
         geo = screen.availableGeometry()
