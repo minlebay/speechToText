@@ -2,6 +2,13 @@ import json
 import logging
 import os
 
+from voice2text.secrets import (
+    DEEPGRAM_API_KEY,
+    GEMINI_API_KEY,
+    GOOGLE_SERVICE_ACCOUNT,
+    get_secret,
+)
+
 log = logging.getLogger(__name__)
 
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "voice2text")
@@ -17,7 +24,9 @@ DEFAULTS = {
     "whisper_model": "base",
     "gemini_model": "gemini-3.8-flash",
     "deepgram_model": "flux-general-multi",
-    "deepgram_multilingual": True,
+    # Код языка (ru, en, sr, de, …) или auto — автоопределение.
+    # Допустимые значения зависят от выбранной модели Deepgram.
+    "deepgram_language_mode": "auto",
     "audio_device": None,
     "sanitize_fillers": False,
     "show_overlay": False,
@@ -49,6 +58,15 @@ def load_config():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
+            # Старый булев флаг и удалённые режимы приводим к актуальным.
+            if "deepgram_language_mode" not in cfg and "deepgram_multilingual" in cfg:
+                cfg["deepgram_language_mode"] = "ru" if cfg["deepgram_multilingual"] else "auto"
+            # «ru_en» убран: Nova-3 не умеет жёстко ограничивать пару языков,
+            # поэтому сводим его к строгому русскому, чтобы не было uk/ar.
+            if cfg.get("deepgram_language_mode") == "ru_en":
+                cfg["deepgram_language_mode"] = "ru"
+            elif cfg.get("deepgram_language_mode") == "single":
+                cfg["deepgram_language_mode"] = "auto"
             for key, value in DEFAULTS.items():
                 cfg.setdefault(key, value)
             log.info("Конфиг загружен: %s", CONFIG_FILE)
@@ -67,14 +85,27 @@ def save_config(cfg):
 
 
 def get_api_key():
-    key = os.environ.get("GEMINI_API_KEY_TTS", "")
+    key = get_secret(GEMINI_API_KEY)
     if not key:
-        log.warning("GEMINI_API_KEY_TTS не установлен")
+        log.warning("API-ключ Gemini не задан в хранилище секретов")
     return key
 
 
 def get_deepgram_api_key():
-    key = os.environ.get("DEEPGRAM_VOICETOTEXT_KEY", "")
+    key = get_secret(DEEPGRAM_API_KEY)
     if not key:
-        log.warning("DEEPGRAM_VOICETOTEXT_KEY не установлен")
+        log.warning("API-ключ Deepgram не задан в хранилище секретов")
     return key
+
+
+def get_google_service_account():
+    """Возвращает данные сервисного аккаунта Google из хранилища секретов."""
+    raw = get_secret(GOOGLE_SERVICE_ACCOUNT)
+    if not raw:
+        log.warning("JSON сервисного аккаунта Google не задан в хранилище секретов")
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        log.error("JSON сервисного аккаунта Google повреждён: %s", e)
+        return None

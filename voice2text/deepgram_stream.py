@@ -12,6 +12,13 @@ SEND_INTERVAL = 0.1  # сек между отправками аудио в со
 FLUX_LANGUAGES = {"en", "es", "fr", "de", "hi", "ru", "pt", "ja", "it", "nl"}
 
 
+def language_hints(mode):
+    """Подсказки языка для Deepgram: код языка либо auto (без подсказок)."""
+    if not mode or mode == "auto":
+        return []
+    return [mode]
+
+
 def is_flux(model):
     return model.startswith("flux")
 
@@ -27,31 +34,38 @@ class DeepgramStream:
     """
 
     def __init__(self, api_key, read_pcm, on_text, model="flux-general-multi", language="ru",
-                 multilingual=True, sample_rate=48000, channels=1):
+                 language_mode="auto", sample_rate=48000, channels=1):
         self._api_key = api_key
         self._read_pcm = read_pcm
         self._on_text = on_text
         self._flux = is_flux(model)
         self._frame = 2 * channels
+        hints = language_hints(language_mode)
         if self._flux:
-            hints = [language] + (["en"] if multilingual else [])
+            # flux-general-en — строго английская модель, language_hint она не принимает.
+            hints = [h for h in hints if h in FLUX_LANGUAGES] if model == "flux-general-multi" else []
             params = [("model", model), ("encoding", "linear16"), ("sample_rate", sample_rate)]
-            params += [("language_hint", h) for h in dict.fromkeys(hints) if h in FLUX_LANGUAGES]
+            params += [("language_hint", h) for h in dict.fromkeys(hints)]
             self._url = "wss://api.deepgram.com/v2/listen?" + urllib.parse.urlencode(params)
         else:
-            if multilingual and model.startswith("nova-3"):
-                language = "multi"
-            self._url = "wss://api.deepgram.com/v1/listen?" + urllib.parse.urlencode({
-                "model": model,
-                "language": language,
-                "encoding": "linear16",
-                "sample_rate": sample_rate,
-                "channels": channels,
-                "interim_results": "true",
-                "smart_format": "true",
-                "punctuate": "true",
-                "endpointing": 100,
-            })
+            if model.startswith("nova-3"):
+                # Один язык — монолингвальный режим Nova-3, он действительно
+                # ограничивает распознавание. multi + hints только смещает выбор.
+                language = hints[0] if hints else "multi"
+            params = [
+                ("model", model),
+                ("language", language),
+                ("encoding", "linear16"),
+                ("sample_rate", sample_rate),
+                ("channels", channels),
+                ("interim_results", "true"),
+                ("smart_format", "true"),
+                ("punctuate", "true"),
+                ("endpointing", 100),
+            ]
+            if language == "multi":
+                params += [("language_hint", h) for h in hints]
+            self._url = "wss://api.deepgram.com/v1/listen?" + urllib.parse.urlencode(params)
         self._ws = None
         self._sent = 0
         self._segments = {}  # Flux: turn_index -> текст; Nova: порядковый номер финала -> текст

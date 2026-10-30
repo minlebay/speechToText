@@ -13,23 +13,45 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QFormLayout,
+    QFrame,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMenu,
+    QMessageBox,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSystemTrayIcon,
+    QTabWidget,
     QVBoxLayout,
+    QWidget,
 )
 
 from voice2text import __version__
-from voice2text.config import get_api_key, get_deepgram_api_key, load_config, save_config, setup_logging
+from voice2text.config import (
+    get_api_key,
+    get_deepgram_api_key,
+    get_google_service_account,
+    load_config,
+    save_config,
+    setup_logging,
+)
 from voice2text.desktop import KeySender, get_selected_text, is_wayland, set_clipboard
 from voice2text.hotkeys import KGlobalAccelHotkeys, hotkey_to_qt
 from voice2text.icons import make_tray_icon
 from voice2text.overlay import OverlayWindow, compute_level
+from voice2text.secrets import (
+    DEEPGRAM_API_KEY,
+    GEMINI_API_KEY,
+    GOOGLE_SERVICE_ACCOUNT,
+    delete_secret,
+    has_secret,
+    set_secret,
+)
 
 log = logging.getLogger(__name__)
 from voice2text.recorder import SAMPLE_RATE, Recorder
@@ -116,6 +138,32 @@ _TRAY_MONO_VARIANTS = [
     ("dark", "Тёмная (для светлых панелей)"),
 ]
 
+_DEEPGRAM_LANGUAGE_MODES = {
+    "flux-general-en": [
+        ("en", "Только английский (модель только английская)"),
+    ],
+    "flux-general-multi": [
+        ("auto", "Автоопределение"),
+        ("ru", "Только русский"),
+        ("en", "Только английский"),
+        ("de", "Только немецкий"),
+        ("es", "Только испанский"),
+        ("fr", "Только французский"),
+        ("hi", "Только хинди"),
+        ("pt", "Только португальский"),
+        ("ja", "Только японский"),
+        ("it", "Только итальянский"),
+        ("nl", "Только нидерландский"),
+    ],
+    "nova-3": [
+        ("auto", "Автоопределение"),
+        ("ru", "Только русский"),
+        ("en", "Только английский"),
+        ("sr", "Только сербский"),
+        ("de", "Только немецкий"),
+    ],
+}
+
 
 FINAL_TEXT_HOLD_MS = 800  # сколько показывать итоговый текст в оверлее после вставки
 
@@ -194,31 +242,73 @@ class SettingsDialog(QDialog):
         self.config = dict(config)
 
         layout = QVBoxLayout(self)
-        form = QFormLayout()
+
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs, 1)
+
+        def add_page(title):
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setWidget(page)
+            self.tabs.addTab(scroll, title)
+            return page_layout
+
+        main_page = add_page("Распознавание")
+        look_page = add_page("Внешний вид")
+        keys_page = add_page("API-ключи")
+
+        # --- Запись и вывод ---
+        control_group = QGroupBox("Запись и вывод")
+        control_form = QFormLayout(control_group)
 
         self.hotkey_edit = QLineEdit(config["hotkey"])
-        form.addRow("Горячая клавиша:", self.hotkey_edit)
+        control_form.addRow("Горячая клавиша:", self.hotkey_edit)
 
         self.code_hotkey_edit = QLineEdit(config.get("code_hotkey", "<ctrl>+<alt>+c"))
-        form.addRow("Горячая клавиша (режим кода):", self.code_hotkey_edit)
+        control_form.addRow("Горячая клавиша (режим кода):", self.code_hotkey_edit)
 
         self.output_combo = QComboBox()
         self.output_combo.addItems(["paste", "clipboard"])
         self.output_combo.setCurrentText(config["output_mode"])
-        form.addRow("Режим вывода:", self.output_combo)
+        control_form.addRow("Режим вывода:", self.output_combo)
 
-        self.language_edit = QLineEdit(config["language"])
-        form.addRow("Язык:", self.language_edit)
+        self.device_combo = QComboBox()
+        self.device_combo.addItem("По умолчанию (системное)", None)
+        for desc, name in _list_pulse_sources():
+            self.device_combo.addItem(desc, name)
+        current_device = config.get("audio_device")
+        if current_device:
+            idx = self.device_combo.findData(current_device)
+            self.device_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        control_form.addRow("Устройство записи:", self.device_combo)
+
+        main_page.addWidget(control_group)
+
+        # --- Распознавание ---
+        speech_group = QGroupBox("Распознавание")
+        speech_form = QFormLayout(speech_group)
+        self._speech_form = speech_form
 
         self.backend_combo = QComboBox()
         self.backend_combo.addItems(["whisper", "gemini", "google_stt", "deepgram"])
         self.backend_combo.setCurrentText(config.get("backend", "whisper"))
-        form.addRow("Движок:", self.backend_combo)
+        speech_form.addRow("Движок:", self.backend_combo)
+
+        self.language_edit = QLineEdit(config["language"])
+        self.language_edit.setToolTip(
+            "Основной язык для Whisper, Gemini и Google STT.\n"
+            "Deepgram это поле не использует — там язык выбирается в настройке «Язык Deepgram»."
+        )
+        speech_form.addRow("Язык:", self.language_edit)
 
         self.whisper_model_combo = QComboBox()
         self.whisper_model_combo.addItems(["tiny", "base", "small", "medium", "large-v3"])
         self.whisper_model_combo.setCurrentText(config.get("whisper_model", "base"))
-        form.addRow("Whisper модель:", self.whisper_model_combo)
+        speech_form.addRow("Whisper модель:", self.whisper_model_combo)
 
         self.gemini_model_combo = QComboBox()
         self.gemini_model_combo.addItems([
@@ -232,39 +322,59 @@ class SettingsDialog(QDialog):
             "gemini-1.5-pro",
         ])
         self.gemini_model_combo.setCurrentText(config.get("gemini_model", "gemini-3.8-flash"))
-        form.addRow("Gemini модель:", self.gemini_model_combo)
+        speech_form.addRow("Gemini модель:", self.gemini_model_combo)
 
         self.deepgram_model_combo = QComboBox()
         self.deepgram_model_combo.addItems([
             "flux-general-multi",
+            "flux-general-en",
             "nova-3",
         ])
         self.deepgram_model_combo.setToolTip(
             "flux-general-multi — потоковое распознавание во время записи, итог сразу после остановки.\n"
+            "flux-general-en — то же, но строго английский язык.\n"
             "nova-3 — запись целиком отправляется после остановки."
         )
         self.deepgram_model_combo.setCurrentText(config.get("deepgram_model", "flux-general-multi"))
-        form.addRow("Deepgram модель:", self.deepgram_model_combo)
+        speech_form.addRow("Deepgram модель:", self.deepgram_model_combo)
 
-        self.deepgram_multi_checkbox = QCheckBox(
-            "Deepgram: мультиязычный режим — смешанная речь, например ru + en (flux и nova-3)"
+        self.deepgram_language_combo = QComboBox()
+        self.deepgram_language_combo.setToolTip(
+            "Список зависит от выбранной модели.\n"
+            "«Только …» — язык фиксируется, другие языки не распознаются.\n"
+            "«Автоопределение» — Deepgram сам определяет язык по речи."
         )
-        self.deepgram_multi_checkbox.setChecked(config.get("deepgram_multilingual", True))
-        form.addRow(self.deepgram_multi_checkbox)
+        speech_form.addRow("Язык Deepgram:", self.deepgram_language_combo)
+        self._deepgram_language_mode = config.get("deepgram_language_mode", "auto")
+        self.deepgram_model_combo.currentTextChanged.connect(self._update_deepgram_languages)
+        self._update_deepgram_languages()
 
-        self.sanitize_checkbox = QCheckBox("Очищать текст от слов-паразитов (доступно только с движком Gemini)")
+        self.sanitize_checkbox = QCheckBox("Очищать текст от слов-паразитов")
         self.sanitize_checkbox.setChecked(config.get("sanitize_fillers", False))
-        form.addRow(self.sanitize_checkbox)
-        self.backend_combo.currentTextChanged.connect(self._update_sanitize_availability)
-        self._update_sanitize_availability(self.backend_combo.currentText())
+        speech_form.addRow(self.sanitize_checkbox)
+
+        main_page.addWidget(speech_group)
+
+        # Показываем только настройки выбранного движка.
+        self._model_rows = {
+            "whisper": (self.whisper_model_combo,),
+            "gemini": (self.gemini_model_combo,),
+            "deepgram": (self.deepgram_model_combo, self.deepgram_language_combo),
+        }
+        self.backend_combo.currentTextChanged.connect(self._update_backend_fields)
+        self._update_backend_fields(self.backend_combo.currentText())
+
+        # --- Оверлей ---
+        overlay_group = QGroupBox("Оверлей")
+        overlay_form = QFormLayout(overlay_group)
 
         self.overlay_checkbox = QCheckBox("Показывать оверлей во время записи")
         self.overlay_checkbox.setChecked(config.get("show_overlay", False))
-        form.addRow(self.overlay_checkbox)
+        overlay_form.addRow(self.overlay_checkbox)
 
-        self.realtime_checkbox = QCheckBox("Показывать распознанный текст в реальном времени в оверлее")
+        self.realtime_checkbox = QCheckBox("Показывать распознанный текст в реальном времени")
         self.realtime_checkbox.setChecked(config.get("realtime_transcription", False))
-        form.addRow(self.realtime_checkbox)
+        overlay_form.addRow(self.realtime_checkbox)
 
         self.overlay_position_combo = QComboBox()
         for value, label in _OVERLAY_POSITIONS:
@@ -272,7 +382,7 @@ class SettingsDialog(QDialog):
         current_position = config.get("overlay_position", "center")
         idx = self.overlay_position_combo.findData(current_position)
         self.overlay_position_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        form.addRow("Положение оверлея:", self.overlay_position_combo)
+        overlay_form.addRow("Положение:", self.overlay_position_combo)
 
         self.overlay_theme_combo = QComboBox()
         for value, label in _OVERLAY_THEMES:
@@ -280,7 +390,7 @@ class SettingsDialog(QDialog):
         current_theme = config.get("overlay_theme", "dark")
         idx = self.overlay_theme_combo.findData(current_theme)
         self.overlay_theme_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        form.addRow("Тема оверлея:", self.overlay_theme_combo)
+        overlay_form.addRow("Тема:", self.overlay_theme_combo)
 
         self.overlay_shape_combo = QComboBox()
         for value, label in _OVERLAY_SHAPES:
@@ -288,7 +398,7 @@ class SettingsDialog(QDialog):
         current_shape = config.get("overlay_shape", "circle")
         idx = self.overlay_shape_combo.findData(current_shape)
         self.overlay_shape_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        form.addRow("Форма оверлея:", self.overlay_shape_combo)
+        overlay_form.addRow("Форма:", self.overlay_shape_combo)
 
         glass_opacity_row = QHBoxLayout()
         self.glass_opacity_slider = QSlider(Qt.Horizontal)
@@ -301,7 +411,7 @@ class SettingsDialog(QDialog):
         )
         glass_opacity_row.addWidget(self.glass_opacity_slider)
         glass_opacity_row.addWidget(self.glass_opacity_label)
-        form.addRow("Прозрачность стекла:", glass_opacity_row)
+        overlay_form.addRow("Прозрачность стекла:", glass_opacity_row)
 
         self.overlay_checkbox.toggled.connect(self._update_realtime_availability)
         self.overlay_checkbox.toggled.connect(self.overlay_position_combo.setEnabled)
@@ -314,9 +424,15 @@ class SettingsDialog(QDialog):
         self.glass_opacity_slider.setEnabled(self.overlay_checkbox.isChecked())
         self._update_realtime_availability(self.overlay_checkbox.isChecked())
 
-        self.tray_mono_checkbox = QCheckBox("Монохромная иконка в трее")
+        look_page.addWidget(overlay_group)
+
+        # --- Иконка в трее ---
+        tray_group = QGroupBox("Иконка в трее")
+        tray_form = QFormLayout(tray_group)
+
+        self.tray_mono_checkbox = QCheckBox("Монохромная иконка")
         self.tray_mono_checkbox.setChecked(config.get("tray_icon_monochrome", False))
-        form.addRow(self.tray_mono_checkbox)
+        tray_form.addRow(self.tray_mono_checkbox)
 
         self.tray_mono_variant_combo = QComboBox()
         for value, label in _TRAY_MONO_VARIANTS:
@@ -326,25 +442,19 @@ class SettingsDialog(QDialog):
         self.tray_mono_variant_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.tray_mono_variant_combo.setEnabled(self.tray_mono_checkbox.isChecked())
         self.tray_mono_checkbox.toggled.connect(self.tray_mono_variant_combo.setEnabled)
-        form.addRow("Цвет монохромной иконки:", self.tray_mono_variant_combo)
+        tray_form.addRow("Цвет иконки:", self.tray_mono_variant_combo)
 
-        self.device_combo = QComboBox()
-        self.device_combo.addItem("По умолчанию (системное)", None)
-        for desc, name in _list_pulse_sources():
-            self.device_combo.addItem(desc, name)
-        current_device = config.get("audio_device")
-        if current_device:
-            idx = self.device_combo.findData(current_device)
-            self.device_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        form.addRow("Устройство записи:", self.device_combo)
+        look_page.addWidget(tray_group)
+        keys_page.addWidget(self._build_secrets_group())
 
-        version_label = QLabel(__version__)
-        version_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        form.addRow("Версия:", version_label)
-
-        layout.addLayout(form)
+        for page in (main_page, look_page, keys_page):
+            page.addStretch(1)
 
         buttons = QHBoxLayout()
+        version_label = QLabel(f"v{__version__}")
+        version_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        buttons.addWidget(version_label)
+        buttons.addStretch(1)
         save_btn = QPushButton("Сохранить")
         cancel_btn = QPushButton("Отмена")
         save_btn.clicked.connect(self.accept)
@@ -353,9 +463,170 @@ class SettingsDialog(QDialog):
         buttons.addWidget(cancel_btn)
         layout.addLayout(buttons)
 
-    def _update_sanitize_availability(self, backend):
-        enabled = backend == "gemini"
-        self.sanitize_checkbox.setEnabled(enabled)
+        screen = self.screen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            max_height = int(available.height() * 0.85)
+            self.setMaximumHeight(max_height)
+            hint = self.sizeHint()
+            self.resize(
+                min(max(hint.width(), 600), int(available.width() * 0.9)),
+                min(hint.height(), max_height),
+            )
+
+    def _build_secrets_group(self):
+        group = QGroupBox("API-ключи")
+        layout = QVBoxLayout(group)
+
+        note = QLabel(
+            "Ключи хранятся в KDE Wallet (или Secret Service, если KWallet недоступен) "
+            "и никогда не записываются в config.json или переменные окружения. "
+            "Сохранённые значения не показываются: пустое поле означает «оставить как было»."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        self._secret_statuses = {}
+        form = QFormLayout()
+        form.addRow(*self._secret_row(
+            GEMINI_API_KEY, "Gemini API ключ:", "Вставьте новый ключ, чтобы сохранить",
+        ))
+        form.addRow(*self._secret_row(
+            DEEPGRAM_API_KEY, "Deepgram API ключ:", "Вставьте новый ключ, чтобы сохранить",
+        ))
+        form.addRow(*self._secret_row(
+            GOOGLE_SERVICE_ACCOUNT, "Google сервисный аккаунт:", "Путь к JSON-файлу сервисного аккаунта",
+            secret=False, browse=True,
+        ))
+        layout.addLayout(form)
+        return group
+
+    def _secret_row(self, name, label, placeholder, secret=True, browse=False):
+        row = QWidget()
+        vertical = QVBoxLayout(row)
+        vertical.setContentsMargins(0, 0, 0, 0)
+        vertical.setSpacing(2)
+
+        horizontal = QHBoxLayout()
+        horizontal.setContentsMargins(0, 0, 0, 0)
+        edit = QLineEdit()
+        edit.setPlaceholderText(placeholder)
+        if secret:
+            edit.setEchoMode(QLineEdit.Password)
+        horizontal.addWidget(edit, 1)
+
+        if browse:
+            browse_btn = QPushButton("Файл…")
+            browse_btn.clicked.connect(lambda: self._choose_service_account(edit))
+            horizontal.addWidget(browse_btn)
+
+        status = QLabel()
+        delete_btn = QPushButton("Удалить")
+        delete_btn.clicked.connect(lambda: self._delete_secret(name, edit, status))
+        horizontal.addWidget(delete_btn)
+
+        vertical.addLayout(horizontal)
+        vertical.addWidget(status)
+        self._refresh_secret_status(name, status)
+        self._secret_statuses[name] = status
+
+        if name == GEMINI_API_KEY:
+            self.gemini_key_edit = edit
+        elif name == DEEPGRAM_API_KEY:
+            self.deepgram_key_edit = edit
+        else:
+            self.google_json_edit = edit
+        return label, row
+
+    def _refresh_secret_status(self, name, status):
+        status.setText("Сохранён" if has_secret(name) else "Не задан")
+
+    def _choose_service_account(self, edit):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "JSON сервисного аккаунта Google", "", "JSON (*.json);;Все файлы (*)",
+        )
+        if path:
+            edit.setText(path)
+
+    def _delete_secret(self, name, edit, status):
+        answer = QMessageBox.question(
+            self,
+            "Voice2Text",
+            "Удалить сохранённый ключ из хранилища секретов?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            delete_secret(name)
+        except Exception as e:
+            QMessageBox.critical(self, "Voice2Text", f"Не удалось удалить ключ: {e}")
+            return
+        edit.clear()
+        status.setText("Не задан")
+
+    def _save_secrets(self):
+        for name, edit in (
+            (GEMINI_API_KEY, self.gemini_key_edit),
+            (DEEPGRAM_API_KEY, self.deepgram_key_edit),
+        ):
+            value = edit.text().strip()
+            if value:
+                set_secret(name, value)
+                edit.clear()
+                self._secret_statuses[name].setText("Сохранён")
+
+        path = self.google_json_edit.text().strip()
+        if path:
+            with open(os.path.expanduser(path), "r", encoding="utf-8") as f:
+                raw = f.read()
+            try:
+                json.loads(raw)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"файл не похож на JSON сервисного аккаунта: {e}") from e
+            set_secret(GOOGLE_SERVICE_ACCOUNT, raw)
+            self.google_json_edit.clear()
+            self._secret_statuses[GOOGLE_SERVICE_ACCOUNT].setText("Сохранён")
+
+    def accept(self):
+        try:
+            self._save_secrets()
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Voice2Text", f"Не удалось сохранить ключ в хранилище секретов:\n{e}",
+            )
+            return
+        super().accept()
+
+    def _update_deepgram_languages(self, *_):
+        previous = self.deepgram_language_combo.currentData() or self._deepgram_language_mode
+        model = self.deepgram_model_combo.currentText()
+        modes = _DEEPGRAM_LANGUAGE_MODES.get(model, _DEEPGRAM_LANGUAGE_MODES["nova-3"])
+        self.deepgram_language_combo.blockSignals(True)
+        self.deepgram_language_combo.clear()
+        for value, label in modes:
+            self.deepgram_language_combo.addItem(label, value)
+        idx = self.deepgram_language_combo.findData(previous)
+        if idx < 0:
+            idx = self.deepgram_language_combo.findData("auto")
+        self.deepgram_language_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.deepgram_language_combo.blockSignals(False)
+        self._deepgram_language_mode = self.deepgram_language_combo.currentData()
+
+    @staticmethod
+    def _set_form_row_visible(form, field, visible):
+        field.setVisible(visible)
+        label = form.labelForField(field)
+        if label is not None:
+            label.setVisible(visible)
+
+    def _update_backend_fields(self, backend):
+        for name, fields in self._model_rows.items():
+            for field in fields:
+                self._set_form_row_visible(self._speech_form, field, name == backend)
+        self._set_form_row_visible(self._speech_form, self.language_edit, backend != "deepgram")
+        self._set_form_row_visible(self._speech_form, self.sanitize_checkbox, backend == "gemini")
 
     def _update_realtime_availability(self, overlay_enabled):
         self.realtime_checkbox.setEnabled(overlay_enabled)
@@ -370,7 +641,7 @@ class SettingsDialog(QDialog):
             "whisper_model": self.whisper_model_combo.currentText(),
             "gemini_model": self.gemini_model_combo.currentText(),
             "deepgram_model": self.deepgram_model_combo.currentText(),
-            "deepgram_multilingual": self.deepgram_multi_checkbox.isChecked(),
+            "deepgram_language_mode": self.deepgram_language_combo.currentData(),
             "audio_device": self.device_combo.currentData(),
             "sanitize_fillers": self.sanitize_checkbox.isChecked(),
             "show_overlay": self.overlay_checkbox.isChecked(),
@@ -543,12 +814,13 @@ class App:
 
     def _on_toggle(self, code_mode=False):
         log.debug("Хоткей нажат, текущее состояние: %s, code_mode=%s", self.state, code_mode)
+        google_credentials = None
         if self.state == "idle":
             if code_mode:
                 if not get_api_key():
                     self.tray.showMessage(
                         "Voice2Text",
-                        "API ключ не установлен. Задайте переменную окружения GEMINI_API_KEY_TTS.",
+                        "API-ключ Gemini не задан. Добавьте его в Настройки → API-ключи.",
                         QSystemTrayIcon.Warning,
                         3000,
                     )
@@ -560,7 +832,7 @@ class App:
                     if not api_key:
                         self.tray.showMessage(
                             "Voice2Text",
-                            "API ключ не установлен. Задайте переменную окружения GEMINI_API_KEY_TTS.",
+                            "API-ключ Gemini не задан. Добавьте его в Настройки → API-ключи.",
                             QSystemTrayIcon.Warning,
                             3000,
                         )
@@ -569,17 +841,18 @@ class App:
                     if not get_deepgram_api_key():
                         self.tray.showMessage(
                             "Voice2Text",
-                            "API ключ не установлен. Задайте переменную окружения DEEPGRAM_VOICETOTEXT_KEY.",
+                            "API-ключ Deepgram не задан. Добавьте его в Настройки → API-ключи.",
                             QSystemTrayIcon.Warning,
                             3000,
                         )
                         return
                 elif backend == "google_stt":
-                    import os
-                    if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+                    google_credentials = get_google_service_account()
+                    if not google_credentials:
                         self.tray.showMessage(
                             "Voice2Text",
-                            "Не задан GOOGLE_APPLICATION_CREDENTIALS. Укажите путь к JSON сервисного аккаунта.",
+                            "JSON сервисного аккаунта Google не задан. "
+                            "Добавьте его в Настройки → API-ключи.",
                             QSystemTrayIcon.Warning,
                             3000,
                         )
@@ -641,7 +914,7 @@ class App:
                 whisper_model = self.config.get("whisper_model", "base")
                 gemini_model = self.config.get("gemini_model", "gemini-3.8-flash")
                 deepgram_model = self.config.get("deepgram_model", "flux-general-multi")
-                deepgram_multilingual = self.config.get("deepgram_multilingual", True)
+                deepgram_language_mode = self.config.get("deepgram_language_mode", "auto")
                 sanitize_fillers = backend == "gemini" and self.config.get("sanitize_fillers", False)
 
                 def worker():
@@ -656,7 +929,8 @@ class App:
                                           api_key=api_key, whisper_model=whisper_model,
                                           gemini_model=gemini_model, sanitize_fillers=sanitize_fillers,
                                           deepgram_model=deepgram_model,
-                                          deepgram_multilingual=deepgram_multilingual)
+                                          deepgram_language_mode=deepgram_language_mode,
+                                          google_credentials=google_credentials)
                         self.signals.transcription_ready.emit(text)
                     except Exception as e:
                         self.signals.error.emit(str(e))
@@ -719,7 +993,7 @@ class App:
             on_text=self.signals.partial_transcription_ready.emit,
             model=self.config.get("deepgram_model", "flux-general-multi"),
             language=self.config["language"],
-            multilingual=self.config.get("deepgram_multilingual", True),
+            language_mode=self.config.get("deepgram_language_mode", "auto"),
             sample_rate=SAMPLE_RATE,
             channels=self.recorder.channels,
         )
@@ -739,7 +1013,8 @@ class App:
         whisper_model = self.config.get("whisper_model", "base")
         gemini_model = self.config.get("gemini_model", "gemini-3.8-flash")
         deepgram_model = self.config.get("deepgram_model", "flux-general-multi")
-        deepgram_multilingual = self.config.get("deepgram_multilingual", True)
+        deepgram_language_mode = self.config.get("deepgram_language_mode", "auto")
+        google_credentials = get_google_service_account() if backend == "google_stt" else None
 
         def worker():
             try:
@@ -747,7 +1022,8 @@ class App:
                                   api_key=api_key, whisper_model=whisper_model,
                                   gemini_model=gemini_model, sanitize_fillers=False,
                                   deepgram_model=deepgram_model,
-                                  deepgram_multilingual=deepgram_multilingual)
+                                  deepgram_language_mode=deepgram_language_mode,
+                                  google_credentials=google_credentials)
                 self.signals.partial_transcription_ready.emit(text)
             except Exception as e:
                 log.debug("Частичная транскрипция не удалась: %s", e)
