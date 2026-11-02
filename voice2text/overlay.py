@@ -1,14 +1,17 @@
 import logging
 import math
+import os
 import random
 
 import numpy as np
-from PyQt5.QtCore import QPointF, QRect, QRectF, Qt, QTimer
+from PyQt5.QtCore import QPointF, QRect, QRectF, Qt, QTimer, pyqtSlot
 from PyQt5.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage
 from PyQt5.QtGui import QBrush, QColor, QCursor, QFont, QPainter, QPainterPath, QPen, QRadialGradient, QRegion
 from PyQt5.QtWidgets import QApplication, QGraphicsDropShadowEffect, QLabel, QVBoxLayout, QWidget
 
 log = logging.getLogger(__name__)
+
+_KWIN_OVERLAY_PLUGIN = "voice2text-overlay"
 
 try:
     from Xlib import Xatom
@@ -103,16 +106,85 @@ def set_skip_taskbar(win_id: int):
         ]
         prop = window.get_full_property(state_atom, Xatom.ATOM)
         states = list(prop.value) if prop is not None else []
-        changed = False
         for atom in wanted:
             if atom not in states:
                 states.append(atom)
-                changed = True
-        if changed:
-            window.change_property(state_atom, Xatom.ATOM, 32, states)
-            display.flush()
+        window.change_property(state_atom, Xatom.ATOM, 32, states)
+        # sync: Qt отправит map-запрос по своему соединению, KWin должен
+        # увидеть состояния раньше, чем возьмёт окно под управление.
+        display.sync()
     except Exception as e:
         log.debug("Не удалось скрыть оверлей из панели задач: %s", e)
+
+
+def set_on_all_desktops(win_id: int):
+    """Закрепляет окно на всех виртуальных рабочих столах KWin.
+
+    Иначе X11-окно оверлея остаётся на том столе, где его показали, и при
+    переключении рабочего стола исчезает вместе с ним."""
+    display = _get_xlib_display()
+    if display is None:
+        return
+    try:
+        window = display.create_resource_object("window", win_id)
+        atom = display.intern_atom("_NET_WM_DESKTOP")
+        window.change_property(atom, Xatom.CARDINAL, 32, [0xFFFFFFFF])
+        # sync, а не flush: Qt отправит map-запрос по своему X-соединению, и
+        # KWin должен увидеть свойство раньше, чем возьмёт окно под управление.
+        display.sync()
+    except Exception as e:
+        log.debug("Не удалось закрепить оверлей на всех рабочих столах: %s", e)
+
+
+def _kwin_overlay_script_path():
+    config_dir = os.path.join(os.path.expanduser("~"), ".config", "voice2text")
+    os.makedirs(config_dir, mode=0o700, exist_ok=True)
+    return os.path.join(config_dir, "kwin-overlay.js")
+
+
+def _install_kwin_overlay_script(pid):
+    """Загружает в KWin скрипт, который держит окна оверлея на всех рабочих
+    столах и вне панели задач. KWin под Wayland игнорирует _NET_WM_DESKTOP
+    для X11-окон, поэтому без него оверлей остаётся на том столе, где его
+    показали."""
+    path = _kwin_overlay_script_path()
+    script = f"""(function () {{
+    var pid = {int(pid)};
+    function mark(w) {{
+        if (w.pid === pid && !w.normalWindow) {{
+            w.onAllDesktops = true;
+            w.skipTaskbar = true;
+            w.activities = [];
+        }}
+    }}
+    workspace.windowList().forEach(mark);
+    workspace.windowAdded.connect(mark);
+}})();
+"""
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(script)
+        bus = QDBusConnection.sessionBus()
+        if not bus.isConnected():
+            return None
+        iface = QDBusInterface("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", bus)
+        if not iface.isValid():
+            return None
+        iface.setTimeout(2000)
+        # Копия от прошлого запуска (в том числе после падения) могла остаться.
+        iface.call("unloadScript", _KWIN_OVERLAY_PLUGIN)
+        reply = iface.call("loadScript", path, _KWIN_OVERLAY_PLUGIN)
+        if reply.type() == QDBusMessage.ErrorMessage:
+            log.debug("KWin не загрузил скрипт оверлея: %s", reply.errorMessage())
+            return None
+        reply = iface.call("start")
+        if reply.type() == QDBusMessage.ErrorMessage:
+            log.debug("KWin не запустил скрипт оверлея: %s", reply.errorMessage())
+            return None
+        return iface
+    except Exception as e:
+        log.debug("Не удалось установить KWin-скрипт для оверлея: %s", e)
+        return None
 
 
 def set_kwin_blur_region(win_id: int, rects):
@@ -735,6 +807,12 @@ class OverlayWindow(QWidget):
         self._shape = "circle"
         self._apply_label_style()
         self._arrange()
+        self._kwin_script = _install_kwin_overlay_script(os.getpid())
+        self._connect_desktop_signal()
+        if self._kwin_script is not None:
+            app = QApplication.instance()
+            if app is not None:
+                app.aboutToQuit.connect(self._cleanup_kwin_script)
 
     @property
     def indicator(self):
@@ -759,6 +837,51 @@ class OverlayWindow(QWidget):
         align = {0.0: Qt.AlignLeft, 1.0: Qt.AlignRight}.get(fx, Qt.AlignHCenter)
         for widget in (self._circle, self._capsule, self._capsule_glass, self.text_label):
             layout.setAlignment(widget, align)
+
+    def _cleanup_kwin_script(self):
+        """Выгружает скрипт KWin при штатном завершении приложения."""
+        if self._kwin_script is None:
+            return
+        try:
+            self._kwin_script.call("unloadScript", _KWIN_OVERLAY_PLUGIN)
+        except Exception as e:
+            log.debug("Не удалось выгрузить KWin-скрипт оверлея: %s", e)
+        self._kwin_script = None
+        try:
+            os.unlink(_kwin_overlay_script_path())
+        except OSError:
+            pass
+
+    def _connect_desktop_signal(self):
+        """KWin под Wayland привязывает X11-окно к тому рабочему столу, где
+        его показали, и не переносит по _NET_WM_DESKTOP. Ловим переключение
+        стола и переотображаем оверлей — так KWin ставит его на текущий."""
+        bus = QDBusConnection.sessionBus()
+        connected = bus.connect(
+            "org.kde.KWin",
+            "/VirtualDesktopManager",
+            "org.kde.KWin.VirtualDesktopManager",
+            "currentChanged",
+            self._on_desktop_changed,
+        )
+        if not connected:
+            log.debug("KWin VirtualDesktopManager недоступен: оверлей не будет следовать за рабочим столом")
+
+    @pyqtSlot(str)
+    def _on_desktop_changed(self, _desktop_id):
+        if not self.isVisible():
+            return
+        if self._kwin_script is not None:
+            # KWin уже держит окно на всех столах; остаётся переехать на
+            # активный монитор, если он сменился вместе со столом.
+            screen = target_screen()
+            if screen is not self._screen:
+                self._screen = screen
+                self._recenter_and_show()
+            return
+        # Без KWin-скрипта окно привязано к старому столу — переотображаем.
+        self.hide()
+        self._recenter_and_show()
 
     def set_theme(self, theme):
         self._theme = theme if theme in _THEMES else "dark"
@@ -920,7 +1043,10 @@ class OverlayWindow(QWidget):
         pos = self._compute_position()
         if pos is not None:
             self.move(*pos)
-        set_skip_taskbar(int(self.winId()))
+        win_id = int(self.winId())
+        if not self.isVisible():
+            set_skip_taskbar(win_id)
+            set_on_all_desktops(win_id)
         self.show()
         self.raise_()
         # Регион блюра — в локальных координатах окна, поэтому обновляем его
