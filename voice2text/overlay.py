@@ -84,6 +84,37 @@ def target_screen():
     return QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
 
 
+def set_skip_taskbar(win_id: int):
+    """Убирает окно из панели задач и пейджера (EWMH SKIP_TASKBAR/SKIP_PAGER).
+
+    Qt.Tool на X11 всё равно оставляет в _NET_WM_WINDOW_TYPE тип NORMAL,
+    поэтому Plasma показывает оверлей отдельной иконкой, пока он видим.
+    Свойства выставляются до show(): при повторном показе KWin сбрасывает
+    _NET_WM_STATE, и их нужно добавить заново."""
+    display = _get_xlib_display()
+    if display is None:
+        return
+    try:
+        window = display.create_resource_object("window", win_id)
+        state_atom = display.intern_atom("_NET_WM_STATE")
+        wanted = [
+            display.intern_atom("_NET_WM_STATE_SKIP_TASKBAR"),
+            display.intern_atom("_NET_WM_STATE_SKIP_PAGER"),
+        ]
+        prop = window.get_full_property(state_atom, Xatom.ATOM)
+        states = list(prop.value) if prop is not None else []
+        changed = False
+        for atom in wanted:
+            if atom not in states:
+                states.append(atom)
+                changed = True
+        if changed:
+            window.change_property(state_atom, Xatom.ATOM, 32, states)
+            display.flush()
+    except Exception as e:
+        log.debug("Не удалось скрыть оверлей из панели задач: %s", e)
+
+
 def set_kwin_blur_region(win_id: int, rects):
     """Просит компоузитор (KWin на Plasma) реально размывать рабочий стол
     под окном в наборе прямоугольников rects=[(x, y, w, h), ...] в локальных
@@ -889,6 +920,7 @@ class OverlayWindow(QWidget):
         pos = self._compute_position()
         if pos is not None:
             self.move(*pos)
+        set_skip_taskbar(int(self.winId()))
         self.show()
         self.raise_()
         # Регион блюра — в локальных координатах окна, поэтому обновляем его
