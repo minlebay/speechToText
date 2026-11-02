@@ -31,6 +31,7 @@ DEFAULTS = {
     "sanitize_fillers": False,
     "show_overlay": False,
     "realtime_transcription": False,
+    "hide_notifications": False,
     "overlay_position": "center",
     "overlay_theme": "dark",
     "overlay_shape": "circle",

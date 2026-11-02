@@ -276,6 +276,14 @@ class SettingsDialog(QDialog):
         self.output_combo.setCurrentText(config["output_mode"])
         control_form.addRow("Режим вывода:", self.output_combo)
 
+        self.hide_notifications_checkbox = QCheckBox("Не показывать уведомления KDE")
+        self.hide_notifications_checkbox.setToolTip(
+            "Скрывает всплывающие уведомления о начале записи и готовом тексте.\n"
+            "Предупреждения и ошибки всё равно показываются."
+        )
+        self.hide_notifications_checkbox.setChecked(config.get("hide_notifications", False))
+        control_form.addRow(self.hide_notifications_checkbox)
+
         self.device_combo = QComboBox()
         self.device_combo.addItem("По умолчанию (системное)", None)
         for desc, name in _list_pulse_sources():
@@ -646,6 +654,7 @@ class SettingsDialog(QDialog):
             "sanitize_fillers": self.sanitize_checkbox.isChecked(),
             "show_overlay": self.overlay_checkbox.isChecked(),
             "realtime_transcription": self.overlay_checkbox.isChecked() and self.realtime_checkbox.isChecked(),
+            "hide_notifications": self.hide_notifications_checkbox.isChecked(),
             "overlay_position": self.overlay_position_combo.currentData(),
             "overlay_theme": self.overlay_theme_combo.currentData(),
             "overlay_shape": self.overlay_shape_combo.currentData(),
@@ -869,7 +878,8 @@ class App:
             self.tray.setIcon(self._tray_icon("recording"))
             status = "Запись кода..." if code_mode else "Запись..."
             self.tray.setToolTip(f"Voice2Text — {status}")
-            self.tray.showMessage("Voice2Text", status, QSystemTrayIcon.Information, 1500)
+            if not self.config.get("hide_notifications", False):
+                self.tray.showMessage("Voice2Text", status, QSystemTrayIcon.Information, 1500)
 
             self._record_start_time = time.time()
             realtime = self.config.get("show_overlay") and self.config.get("realtime_transcription", False)
@@ -951,7 +961,8 @@ class App:
             self.keys.send("ctrl+v")
 
         preview = text[:50] + ("..." if len(text) > 50 else "")
-        self.tray.showMessage("Voice2Text", preview, QSystemTrayIcon.Information, 3000)
+        if not self.config.get("hide_notifications", False):
+            self.tray.showMessage("Voice2Text", preview, QSystemTrayIcon.Information, 3000)
         self.state = "idle"
         self.tray.setIcon(self._tray_icon("idle"))
         self.tray.setToolTip("Voice2Text — Готов")
